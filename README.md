@@ -1,0 +1,1 @@
+- `golang-installer.sh` - installs or updates golang on linux
