@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PACMAN_PKGS=(aichat alsa-utils base base-devel brightnessctl btop dmenu docker docker-compose efibootmgr fontconfig git i3-wm intel-media-driver intel-ucode iwd jq lazygit libva-intel-driver libxft linux linux-firmware mesa neovim noto-fonts-emoji openssh otf-firamono-nerd pass postgresql redshift reflector sudo tmux unzip uv vulkan-intel xclip xorg-server xorg-xinit xorg-xsetroot xorg-xwininfo)
-AUR_PKGS=(windsurf brave-bin)
+AUR_PKGS=(lazydocker-bin windsurf brave-bin)
 
 [[ $EUID -ne 0 ]] || exit 1
 sudo -v
