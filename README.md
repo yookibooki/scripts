@@ -1,1 +1,2 @@
-- `golang-installer.sh` - installs or updates golang on linux
+- `go-updater/ba.sh` - updates/installs golang on linux
+- `arch-setup/ba.sh` - installs custom arch linux setup
