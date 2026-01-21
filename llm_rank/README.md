@@ -1,5 +1,5 @@
-`fetch.py` writes ranked model labels to `models.md`.
+`fetch.py` writes ranked models to `models.md`.
 
 ```bash
-python fetch.py
+uv venv && uv run python fetch.py
 ```
