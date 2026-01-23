@@ -1,3 +1,2 @@
 - `go_updater/ba.sh` - updates/installs golang on linux
 - `arch_setup/ba.sh` - installs custom arch linux setup
-- `llm_rank/fetch.py` - writes ranked models to `models.md`
