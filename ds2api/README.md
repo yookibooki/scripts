@@ -1,5 +1,7 @@
 # ds2api
 
+Original repository: [CJackHwang/ds2api](https://github.com/CJackHwang/ds2api)
+
 ## Quick start
 
 1. Create a DeepSeek account: https://chat.deepseek.com/
