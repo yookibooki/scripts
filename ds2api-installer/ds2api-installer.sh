@@ -1,15 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="${DS2API_REPO:-CJackHwang/ds2api}"
-INSTALL_ROOT="${DS2API_INSTALL_ROOT:-${HOME}/.local/share/ds2api}"
-BIN_DIR="${DS2API_BIN_DIR:-${HOME}/.local/bin}"
+REPO="CJackHwang/ds2api"
+INSTALL_ROOT="${HOME}/.local/share/ds2api"
+BIN_DIR="${HOME}/.local/bin"
 BIN_NAME="ds2api"
 
-cmd="update"
-tag=""
-force=0
-purge=0
+cmd="install"
 
 api_latest() { printf 'https://api.github.com/repos/%s/releases/latest' "$REPO"; }
 
@@ -19,11 +16,9 @@ need() { command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"; 
 
 usage() {
   cat <<EOF
-Usage: ds2api-installer.sh [install|update|status|uninstall] [--tag vX.Y.Z] [--root PATH] [--bin-dir PATH] [--repo owner/name] [--force] [--purge]
+Usage: ds2api-installer.sh [install|uninstall]
 EOF
 }
-
-normalize_tag() { case "$1" in v*) printf '%s' "$1" ;; *) printf 'v%s' "$1" ;; esac; }
 
 detect_platform() {
   local os arch
@@ -53,13 +48,6 @@ download() {
   curl -fL --proto '=https' --tlsv1.2 --retry 3 --retry-all-errors --connect-timeout 10 --max-time 300 -o "$2" "$1"
 }
 
-validate_tag() {
-  case "$1" in
-    v[0-9]*) ;;
-    *) die "invalid release tag: $1" ;;
-  esac
-}
-
 checksum_of() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi
 }
@@ -83,13 +71,8 @@ extract_archive() {
 parse_args() {
   while [ $# -gt 0 ]; do
     case "$1" in
-      install|update|status|uninstall|remove) cmd="$1" ;;
-      --tag) shift; [ $# -gt 0 ] || die "--tag requires a value"; tag="$1" ;;
-      --root) shift; [ $# -gt 0 ] || die "--root requires a value"; INSTALL_ROOT="$1" ;;
-      --bin-dir) shift; [ $# -gt 0 ] || die "--bin-dir requires a value"; BIN_DIR="$1" ;;
-      --repo) shift; [ $# -gt 0 ] || die "--repo requires a value"; REPO="$1" ;;
-      --force) force=1 ;;
-      --purge) purge=1 ;;
+      install) cmd="$1" ;;
+      uninstall|remove) cmd="uninstall" ;;
       -h|--help) usage; exit 0 ;;
       *) die "unknown argument: $1" ;;
     esac
@@ -98,7 +81,7 @@ parse_args() {
 }
 
 install_release() {
-  local release_tag="$1" os arch asset url sums_url tmpdir archive sums_file extract_dir extracted_root extracted_name version_root current_link bin_path current_target
+  local release_tag os arch asset url sums_url tmpdir archive sums_file extract_dir extracted_root extracted_name version_root current_link bin_path current_target
 
   read -r os arch <<EOF
 $(detect_platform)
@@ -110,11 +93,6 @@ EOF
   version_root="${INSTALL_ROOT}/releases/${release_tag}"
   current_link="${INSTALL_ROOT}/current"
   bin_path="${BIN_DIR}/${BIN_NAME}"
-
-  if [ -L "$current_link" ]; then
-    current_target=$(readlink "$current_link" || true)
-    case "$current_target" in *"/${release_tag}/"*) [ "$force" -eq 0 ] && { log "${BIN_NAME} ${release_tag} already installed"; return 0; } ;; esac
-  fi
 
   need tar
   tmpdir=$(mktemp -d)
@@ -149,34 +127,18 @@ EOF
   log "config:  ${INSTALL_ROOT}/config.json"
 }
 
-status() {
-  if [ -L "${INSTALL_ROOT}/current" ]; then
-    log "current: $(readlink "${INSTALL_ROOT}/current")"
-  else
-    log "current: not installed"
-  fi
-}
-
 uninstall() {
   rm -f "${BIN_DIR}/${BIN_NAME}" "${INSTALL_ROOT}/current"
-  if [ "$purge" -eq 1 ]; then
-    rm -rf "${INSTALL_ROOT}"
-  fi
   log "uninstalled ${BIN_NAME}"
 }
 
 main() {
   parse_args "$@"
   case "$cmd" in
-    install|update)
-      [ -n "$tag" ] || tag=$(latest_tag)
-      [ -n "$tag" ] || die "failed to resolve latest release tag"
-      tag=$(normalize_tag "$tag")
-      validate_tag "$tag"
-      install_release "$tag"
+    install)
+      install_release "$(latest_tag)"
       ;;
-    status) status ;;
-    uninstall|remove) uninstall ;;
+    uninstall) uninstall ;;
   esac
 }
 
