@@ -1,3 +1,1 @@
-# scripts
-
 - `ds2api/` — install/uninstall for DS2API
