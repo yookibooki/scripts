@@ -81,7 +81,7 @@ parse_args() {
 }
 
 install_release() {
-  local release_tag os arch asset url sums_url tmpdir archive sums_file extract_dir extracted_root extracted_name version_root current_link bin_path current_target
+  local release_tag="$1" os arch asset url sums_url tmpdir archive sums_file extract_dir extracted_root extracted_name version_root current_link bin_path current_target
 
   read -r os arch <<EOF
 $(detect_platform)

@@ -3,13 +3,15 @@
 One-line install/update (Linux/macOS):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/yookibooki/scripts/main/ds2api-installer/ds2api-installer.sh | bash
+curl -fsSL -H 'Accept: application/vnd.github.v3.raw' \
+  https://api.github.com/repos/yookibooki/scripts/contents/ds2api-installer/ds2api-installer.sh?ref=main | bash
 ```
 
 Uninstall:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/yookibooki/scripts/main/ds2api-installer/ds2api-installer.sh | bash -s -- uninstall
+curl -fsSL -H 'Accept: application/vnd.github.v3.raw' \
+  https://api.github.com/repos/yookibooki/scripts/contents/ds2api-installer/ds2api-installer.sh?ref=main | bash -s -- uninstall
 ```
 
 Defaults:
