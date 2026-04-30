@@ -6,8 +6,6 @@ INSTALL_ROOT="${HOME}/.local/share/ds2api"
 BIN_DIR="${HOME}/.local/bin"
 BIN_NAME="ds2api"
 
-cmd="install"
-
 api_latest() { printf 'https://api.github.com/repos/%s/releases/latest' "$REPO"; }
 
 log() { printf '%s\n' "$*" >&2; }
@@ -16,7 +14,7 @@ need() { command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"; 
 
 usage() {
   cat <<EOF
-Usage: install.sh [install|uninstall]
+Usage: install.sh
 EOF
 }
 
@@ -68,20 +66,8 @@ extract_archive() {
   esac
 }
 
-parse_args() {
-  while [ $# -gt 0 ]; do
-    case "$1" in
-      install) cmd="$1" ;;
-      uninstall|remove) cmd="uninstall" ;;
-      -h|--help) usage; exit 0 ;;
-      *) die "unknown argument: $1" ;;
-    esac
-    shift
-  done
-}
-
 install_release() {
-  local release_tag="$1" os arch asset url sums_url tmpdir archive sums_file extract_dir extracted_root extracted_name version_root current_link bin_path current_target
+  local release_tag="$1" os arch asset url sums_url tmpdir archive sums_file extract_dir extracted_root extracted_name version_root current_link bin_path
 
   read -r os arch <<EOF
 $(detect_platform)
@@ -165,35 +151,20 @@ EOF
   log "service: ${service_file}"
 }
 
-uninstall_user_service() {
-  local service_dir service_file
-  service_dir="${HOME}/.config/systemd/user"
-  service_file="${service_dir}/ds2api.service"
-
-  if [ -f "$service_file" ] && command -v systemctl >/dev/null 2>&1; then
-    systemctl --user disable --now ds2api.service >/dev/null 2>&1 || true
-    systemctl --user daemon-reload >/dev/null 2>&1 || true
-  fi
-  rm -f "$service_file"
-}
-
-uninstall() {
-  rm -f "${BIN_DIR}/${BIN_NAME}" "${INSTALL_ROOT}/current"
-  log "uninstalled ${BIN_NAME}"
-}
-
 main() {
-  parse_args "$@"
-  case "$cmd" in
-    install)
+  case "${1:-}" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    "")
       install_release "$(latest_tag)"
       if [ "$(uname -s | tr '[:upper:]' '[:lower:]')" = "linux" ]; then
         install_user_service
       fi
       ;;
-    uninstall)
-      uninstall_user_service
-      uninstall
+    *)
+      die "unknown argument: $1"
       ;;
   esac
 }

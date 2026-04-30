@@ -4,4 +4,4 @@ Repository of small shell scripts.
 
 ## Included
 
-- `ds2api/` — installer/updater for DS2API
+- `ds2api/` — install/uninstall for DS2API
