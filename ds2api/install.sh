@@ -16,7 +16,7 @@ need() { command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"; 
 
 usage() {
   cat <<EOF
-Usage: ds2api-installer.sh [install|uninstall]
+Usage: install.sh [install|uninstall]
 EOF
 }
 

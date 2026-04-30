@@ -11,4 +11,4 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Syntax check
-        run: bash -n ds2api-installer/ds2api-installer.sh
+        run: bash -n ds2api/install.sh
