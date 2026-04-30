@@ -17,7 +17,8 @@ Defaults:
 - binary symlink: `~/.local/bin/ds2api`
 
 The launcher automatically points DS2API at `~/.local/share/ds2api/config.json`.
-The installer always fetches the latest DS2API release, verifies `sha256sums.txt`, preserves `config.json`, and updates the `current` symlink.
+The installer always fetches the latest DS2API release, verifies `sha256sums.txt`, preserves `config.json`, updates the `current` symlink, and installs a Linux systemd **user** service.
+User service file: `~/.config/systemd/user/ds2api.service`
 
 CI:
 - `install.sh` is syntax-checked on push / PR

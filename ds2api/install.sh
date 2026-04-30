@@ -135,6 +135,48 @@ EOF
   log "config:  ${INSTALL_ROOT}/config.json"
 }
 
+install_user_service() {
+  local service_dir service_file
+  service_dir="${HOME}/.config/systemd/user"
+  service_file="${service_dir}/ds2api.service"
+
+  mkdir -p "$service_dir"
+  cat >"$service_file" <<EOF
+[Unit]
+Description=DS2API
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=${INSTALL_ROOT}
+ExecStart=${BIN_DIR}/${BIN_NAME}
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+EOF
+
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl --user daemon-reload >/dev/null 2>&1 || true
+    systemctl --user enable --now ds2api.service >/dev/null 2>&1 || true
+  fi
+
+  log "service: ${service_file}"
+}
+
+uninstall_user_service() {
+  local service_dir service_file
+  service_dir="${HOME}/.config/systemd/user"
+  service_file="${service_dir}/ds2api.service"
+
+  if [ -f "$service_file" ] && command -v systemctl >/dev/null 2>&1; then
+    systemctl --user disable --now ds2api.service >/dev/null 2>&1 || true
+    systemctl --user daemon-reload >/dev/null 2>&1 || true
+  fi
+  rm -f "$service_file"
+}
+
 uninstall() {
   rm -f "${BIN_DIR}/${BIN_NAME}" "${INSTALL_ROOT}/current"
   log "uninstalled ${BIN_NAME}"
@@ -145,8 +187,14 @@ main() {
   case "$cmd" in
     install)
       install_release "$(latest_tag)"
+      if [ "$(uname -s | tr '[:upper:]' '[:lower:]')" = "linux" ]; then
+        install_user_service
+      fi
       ;;
-    uninstall) uninstall ;;
+    uninstall)
+      uninstall_user_service
+      uninstall
+      ;;
   esac
 }
 
