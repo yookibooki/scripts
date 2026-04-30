@@ -19,7 +19,7 @@ need() { command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"; 
 
 usage() {
   cat <<EOF
-Usage: ds2api.sh [install|update|status|uninstall] [--tag vX.Y.Z] [--root PATH] [--bin-dir PATH] [--repo owner/name] [--force] [--purge]
+Usage: ds2api-installer.sh [install|update|status|uninstall] [--tag vX.Y.Z] [--root PATH] [--bin-dir PATH] [--repo owner/name] [--force] [--purge]
 EOF
 }
 
