@@ -121,7 +121,15 @@ EOF
     cp "${current_link}/config.example.json" "${INSTALL_ROOT}/config.json"
   fi
 
-  ln -sfn "${INSTALL_ROOT}/current/${BIN_NAME}" "$bin_path"
+  rm -f "$bin_path"
+  cat >"$bin_path" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+export DS2API_CONFIG_PATH="${INSTALL_ROOT}/config.json"
+exec "${INSTALL_ROOT}/current/${BIN_NAME}" "\$@"
+EOF
+  chmod +x "$bin_path"
+
   log "installed ${release_tag}"
   log "binary: ${bin_path}"
   log "config:  ${INSTALL_ROOT}/config.json"
