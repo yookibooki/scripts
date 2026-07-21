@@ -1,8 +1,8 @@
-- Rust toolchain required; build with `cargo build --release`, run `./target/release/olx-monitor`
-- Polls OLX JSON listing API directly via HTTP (no browser), uses `ureq` HTTP client
-- Output: `olx_posts.txt` — plain text, one post per block (title, price, phone, description)
+- Rust toolchain required; build with `cargo build --release`
+- Single binary `olx-watch` in `src/main.rs` (only deps: ureq, serde, serde_json)
+- Polls OLX JSON listing API directly via HTTP
+- Output: `olx_posts.txt` — plain text, one post per block (title, price, -, description)
 - State: `state.json` (sorted array of seen IDs, persisted across restarts)
 - Config: `POLL_INTERVAL` (default 15000ms), set via env var or baked at compile time
-- Phone API (`/api/v1/offers/{id}/limited-phones/`) fetched via CDP over WebSocket to `obscura serve` on `ws://127.0.0.1:9222` — creates a page, navigates to the offer, evaluates JS `fetch()` with browser headers; panics on any CDP failure (obscura must be running)
-- Dependencies: `ureq`, `serde`, `serde_json`, `tungstenite`, `url`
-- All data from JSON API — no HTML parsing
+- Adaptive polling: doubles interval after 3 empty rounds (up to 5 min), resets on new posts
+- Error logging: `[ERROR]` and `[WARN]` prefixed messages on stderr

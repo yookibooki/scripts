@@ -2,12 +2,14 @@
 target/
 
 # Generated data and state
-olx_posts.json
 olx_posts.txt
 state.json
 
 # Logs
 monitor.log
+
+# Go phone-fetch helper (compiled binary)
+phone-fetch
 
 # Playwright (legacy)
 node_modules/

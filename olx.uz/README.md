@@ -1,19 +1,17 @@
-# OLX.uz New Posts Monitor
+# OLX.uz New Posts Watch
 
-Rust monitor that polls [OLX.uz](https://www.olx.uz) for newly created listings via their JSON API. No browser required for listing data — lightweight and efficient. Outputs plain text format for token-efficient LLM consumption.
+Rust monitor that polls [OLX.uz](https://www.olx.uz) for newly created listings via their JSON API.
 
 ## Stack
 
-- **Rust** — compiled binary, ~5 MB RSS at runtime
-- **ureq** — lightweight HTTP client (only Rust dependency)
-- **No browser needed** for listing polling — direct HTTP calls
+- **Rust** — compiled binary, ~3 MB RSS at runtime
+- **ureq** — lightweight HTTP client
 
 ## How it works
 
 1. Polls `/api/v1/offers/` every ~15s for the latest listings
 2. Detects new posts by tracking seen IDs in `state.json`
-3. Tries to fetch the phone number for each new post via `/api/v1/offers/{id}/limited-phones/`
-4. Appends each post to `olx_posts.txt` in plain text
+3. Appends each post to `olx_posts.txt` in plain text
 
 ## Output format
 
@@ -22,56 +20,40 @@ Rust monitor that polls [OLX.uz](https://www.olx.uz) for newly created listings 
 ```
 Title
 Price
-Phone
+-
 Description
 
 Next Title
-Price
-Phone
-Description
-```
-
-Example:
-
-```
-Ёгли Кунжара (жмых) пахта чигитиники, аралашмаларсиз.
-6000
-+99 897 3957557
-Ёгли Кунжара пахта чигитиники, хеч кандай кушимчаларсиз. Копланган, 1 коп - 35 кг.
-
-Аэрогриль Aerogril SAF1308TPBK HOFMANN
-838180
--
-Nomi: 3 ta 1 ta chuqur qovurgich (Gril, Pech, chuqur qovurgich)...
+...
 ```
 
 Fields:
 - **Title** — as-is from OLX
-- **Price** — numeric value, or `-` if not available
-- **Phone** — contact number, or `-` if unavailable (phone API may be blocked for plain HTTP)
+- **Price** — numeric value
+- **Phone** — always `-` (not fetched)
 - **Description** — full description, HTML stripped
 
 ## Quick start
 
 ```bash
-# 1. Build
+# Build
 cd ~/workspace/scripts/olx.uz
 cargo build --release
 
-# 2. Run (background)
-./target/release/olx-monitor &
+# Run (background)
+./target/release/olx-watch >> monitor.log 2>&1 &
 
-# 3. Watch logs (stderr)
+# Watch logs (stderr)
 tail -f monitor.log
 ```
 
-Stop with `pkill olx-monitor`. State saves automatically.
+Stop with `pkill olx-watch`. State saves automatically.
 
 ## Files
 
 | File | Purpose |
 |------|---------|
-| `src/main.rs` | Main source code |
+| `src/main.rs` | Rust monitor — polls listings |
 | `Cargo.toml` | Rust package manifest |
 | `state.json` | Persisted set of seen ad IDs |
 | `olx_posts.txt` | Output — plain text posts |
@@ -82,3 +64,16 @@ Via environment variables:
 
 - `POLL_INTERVAL` — polling interval in ms (default: `15000`)
   Can also be baked at compile time: `POLL_INTERVAL=30000 cargo build --release`
+
+### Adaptive polling
+
+The monitor automatically adjusts the poll interval:
+- After **3 consecutive empty rounds**, the interval doubles (up to 5 min max)
+- Resets to the configured interval as soon as new posts appear
+
+### Error logging
+
+Errors are printed to stderr with `[ERROR]` and `[WARN]` prefixes:
+- HTTP failures (network, timeouts)
+- JSON parse errors
+- Missing fields
