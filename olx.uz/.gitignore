@@ -1,0 +1,18 @@
+# Rust build output
+target/
+
+# Generated data and state
+olx_posts.json
+olx_posts.txt
+state.json
+
+# Logs
+monitor.log
+
+# Playwright (legacy)
+node_modules/
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
+/playwright/.auth/

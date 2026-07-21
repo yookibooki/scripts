@@ -1,0 +1,7 @@
+- Rust toolchain required; build with `cargo build --release`, run `./target/release/olx-monitor`
+- Polls OLX JSON listing API directly via HTTP (no browser), uses `ureq` HTTP client
+- Output: `olx_posts.txt` — plain text, one post per block (title, price, phone, description)
+- State: `state.json` (sorted array of seen IDs, persisted across restarts)
+- Config: `POLL_INTERVAL` (default 15000ms), set via env var or baked at compile time
+- Phone API (`/api/v1/offers/{id}/limited-phones/`) requires a browser session — currently blocked for plain HTTP; phone field shows `-` when unavailable
+- All data from JSON API — no HTML parsing

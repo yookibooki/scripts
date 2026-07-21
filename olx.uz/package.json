@@ -1,0 +1,12 @@
+{
+  "name": "olx.uz",
+  "version": "1.0.0",
+  "description": "OLX.uz new posts monitor",
+  "main": "monitor.mjs",
+  "scripts": {
+    "start": "node monitor.mjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
+}
