@@ -3,6 +3,8 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::io::Write;
 use std::time::{Duration, Instant};
+use tungstenite::Message;
+use tungstenite::connect as ws_connect;
 
 // ─── Config ─────────────────────────────────────────────────────────
 
@@ -84,14 +86,148 @@ fn get_offers(offset: u32, limit: u32) -> Vec<serde_json::Value> {
         .unwrap_or_default()
 }
 
-fn get_phones(ad_id: &serde_json::Value) -> Vec<String> {
-    let url = format!("{API}/{ad_id}/limited-phones/");
-    fetch_json(&url)
-        .and_then(|v| {
-            serde_json::from_value::<PhonesData>(v.get("data")?.clone()).ok()
-        })
-        .and_then(|d| d.phones)
-        .unwrap_or_default()
+// ─── CDP phone fetch via obscura (Chrome DevTools Protocol) ─
+
+fn get_browser_ws_url() -> String {
+    let resp = ureq::get("http://127.0.0.1:9222/json/version")
+        .call()
+        .expect("Cannot reach obscura CDP at http://127.0.0.1:9222 — is `obscura serve --stealth --port 9222` running?");
+    let text = resp
+        .into_body()
+        .read_to_string()
+        .expect("Failed to read obscura version response");
+    let v: serde_json::Value = serde_json::from_str(&text)
+        .expect("Failed to parse obscura version JSON");
+    let url_str = v
+        .get("webSocketDebuggerUrl")
+        .and_then(|v| v.as_str())
+        .expect("obscura version response missing webSocketDebuggerUrl");
+    url::Url::parse(url_str).expect("obscura webSocketDebuggerUrl is not a valid URL");
+    url_str.to_string()
+}
+
+fn cdp_fetch_phones(offer_id: u64) -> Vec<String> {
+    // 1. Get browser WebSocket URL from obscura (panics if unreachable)
+    let ws_url = get_browser_ws_url();
+
+    // 2. Connect via WebSocket
+    let (mut socket, _) = ws_connect(&ws_url)
+        .expect("Failed to connect to obscura WebSocket");
+
+    let mut msg_id = 0u64;
+
+    // Helper macro: send a CDP command and wait for its result
+    macro_rules! cdp {
+        ($method:expr, $params:expr, $session:expr) => {{
+            msg_id += 1;
+            let mut cmd = serde_json::json!({
+                "id": msg_id,
+                "method": $method,
+                "params": $params,
+            });
+            if let Some(sid) = $session {
+                cmd["sessionId"] = serde_json::json!(sid);
+            }
+            let mut ret = None;
+            if socket.send(Message::Text(cmd.to_string())).is_ok() {
+                loop {
+                    match socket.read() {
+                        Ok(Message::Text(txt)) => {
+                            if let Ok(v) =
+                                serde_json::from_str::<serde_json::Value>(&txt)
+                            {
+                                if v.get("id").and_then(|x| x.as_u64())
+                                    == Some(msg_id)
+                                {
+                                    ret = v.get("result").cloned();
+                                    break;
+                                }
+                            }
+                        }
+                        Ok(Message::Close(_)) | Err(_) => break,
+                        _ => continue,
+                    }
+                }
+            }
+            ret
+        }};
+    }
+
+    // 3. Create a new page target
+    let target_result = cdp!(
+        "Target.createTarget",
+        serde_json::json!({"url": "about:blank"}),
+        None::<&str>
+    )
+    .expect("CDP Target.createTarget failed");
+    let target_id = target_result
+        .get("targetId")
+        .and_then(|v| v.as_str())
+        .expect("CDP Target.createTarget response missing targetId")
+        .to_string();
+
+    // 4. Attach to the target (flattened session on the same WS)
+    let attach_result = cdp!(
+        "Target.attachToTarget",
+        serde_json::json!({"targetId": &target_id, "flatten": true}),
+        None::<&str>
+    )
+    .expect("CDP Target.attachToTarget failed");
+    let session_id = attach_result
+        .get("sessionId")
+        .and_then(|v| v.as_str())
+        .expect("CDP Target.attachToTarget response missing sessionId")
+        .to_string();
+
+    // 5. Navigate to the offer page
+    let offer_url = format!("https://www.olx.uz/offer/{}/", offer_id);
+    cdp!(
+        "Page.navigate",
+        serde_json::json!({"url": &offer_url}),
+        Some(&session_id as &str)
+    );
+
+    // 6. Wait for page to load
+    std::thread::sleep(Duration::from_millis(3000));
+
+    // 7. Run JS to fetch the phone API from inside the browser context
+    let js = format!(
+        r#"(async () => {{ const r = await fetch('https://www.olx.uz/api/v1/offers/{0}/limited-phones/', {{ method: 'GET', credentials: 'include', headers: {{ 'Accept': 'application/json, text/plain, */*', 'X-Requested-With': 'XMLHttpRequest', 'Referer': 'https://www.olx.uz/offer/{0}/' }} }}); const t = await r.text(); return {{ status: r.status, body: t }}; }})()"#,
+        offer_id
+    );
+    let eval_result = cdp!(
+        "Runtime.evaluate",
+        serde_json::json!({"expression": &js, "awaitPromise": true}),
+        Some(&session_id as &str)
+    )
+    .expect("CDP Runtime.evaluate failed");
+
+    // 8. Parse phones from the evaluation result
+    let eval_value = eval_result
+        .pointer("/result/value")
+        .expect("CDP Runtime.evaluate result missing /result/value");
+    let status = eval_value
+        .get("status")
+        .and_then(|v| v.as_i64())
+        .expect("CDP JS fetch result missing status");
+    assert_eq!(status, 200, "CDP JS fetch returned status {}", status);
+    let body = eval_value
+        .get("body")
+        .and_then(|v| v.as_str())
+        .expect("CDP JS fetch result missing body");
+    let phones_data: PhonesData =
+        serde_json::from_str(body).expect("CDP JS fetch body is not valid JSON");
+    let phones = phones_data.phones.unwrap_or_default();
+
+    // 9. Clean up — close the page target and WebSocket
+    let _ = cdp!(
+        "Target.closeTarget",
+        serde_json::json!({"targetId": &target_id}),
+        None::<&str>
+    );
+    let _ = socket.send(Message::Close(None));
+
+    phones
 }
 
 // ─── Strip HTML tags ────────────────────────────────────────────────
@@ -201,9 +337,8 @@ fn poll(seen: &mut BTreeSet<u64>) -> u32 {
             let price = format_price(offer);
 
             // Phone
-            let rec_id = offer.get("id").cloned().unwrap_or(serde_json::Value::Null);
             std::thread::sleep(Duration::from_millis(400));
-            let phones = get_phones(&rec_id);
+            let phones = cdp_fetch_phones(oid);
             let phone = format_phone(&phones);
 
             // Description
