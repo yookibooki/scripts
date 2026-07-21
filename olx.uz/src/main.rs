@@ -48,13 +48,13 @@ fn save_state(ids: &BTreeSet<u64>) {
 // Output
 // ---------------------------------------------------------------------------
 
-fn append_post(title: &str, price: &str, phone: &str, desc: &str) {
+fn append_post(title: &str, price: &str, desc: &str) {
     if let Ok(mut f) = fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(OUTPUT_FILE)
     {
-        let _ = writeln!(f, "{title}\n{price}\n{phone}\n{desc}\n");
+        let _ = writeln!(f, "{title}\n{price}\n{desc}\n");
     }
 }
 
@@ -207,14 +207,13 @@ fn poll(agent: &ureq::Agent, seen: &mut BTreeSet<u64>) -> u32 {
                 .trim()
                 .to_string();
             let price = format_price(offer);
-            let phone = "-".to_string();
             let desc = offer
                 .get("description")
                 .and_then(|v| v.as_str())
                 .map(strip_html)
                 .unwrap_or_default();
 
-            append_post(&title, &price, &phone, &desc);
+            append_post(&title, &price, &desc);
             count += 1;
         }
     }

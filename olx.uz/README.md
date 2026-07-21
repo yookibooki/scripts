@@ -20,7 +20,6 @@ Rust monitor that polls [OLX.uz](https://www.olx.uz) for newly created listings 
 ```
 Title
 Price
--
 Description
 
 Next Title
@@ -30,7 +29,6 @@ Next Title
 Fields:
 - **Title** — as-is from OLX
 - **Price** — numeric value
-- **Phone** — always `-` (not fetched)
 - **Description** — full description, HTML stripped
 
 ## Quick start

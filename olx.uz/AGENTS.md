@@ -1,7 +1,7 @@
 - Rust toolchain required; build with `cargo build --release`
 - Single binary `olx-watch` in `src/main.rs` (only deps: ureq, serde, serde_json)
 - Polls OLX JSON listing API directly via HTTP
-- Output: `olx_posts.txt` — plain text, one post per block (title, price, -, description)
+- Output: `olx_posts.txt` — plain text, one post per block (title, price, description)
 - State: `state.json` (sorted array of seen IDs, persisted across restarts)
 - Config: `POLL_INTERVAL` (default 15000ms), set via env var or baked at compile time
 - Adaptive polling: doubles interval after 3 empty rounds (up to 5 min), resets on new posts
