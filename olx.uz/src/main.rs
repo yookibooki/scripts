@@ -129,7 +129,7 @@ fn cdp_fetch_phones(offer_id: u64) -> Vec<String> {
                 cmd["sessionId"] = serde_json::json!(sid);
             }
             let mut ret = None;
-            if socket.send(Message::Text(cmd.to_string())).is_ok() {
+            if socket.send(Message::Text(cmd.to_string().into())).is_ok() {
                 loop {
                     match socket.read() {
                         Ok(Message::Text(txt)) => {
