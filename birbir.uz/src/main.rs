@@ -133,6 +133,7 @@ fn fetch_page(
     let body = serde_json::json!({
         "page": page,
         "perPage": PAGE_SIZE,
+        "region": "all",
     });
 
     let raw = match post_json(agent, &url, &body, token) {

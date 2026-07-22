@@ -5,7 +5,10 @@ use std::fs;
 use std::io::Write;
 use std::time::Duration;
 
-const PAGE_SIZE: u64 = 40;
+// Note: the API rejects limit values > 50 but always returns 52 items per page.
+// PAGE_SIZE is set to 50 (the max the API allows) and used as the offset step
+// to advance one full page at a time.
+const PAGE_SIZE: u64 = 50;
 const MAX_OFFSET: u64 = 1000;
 const POLL_DELAY_MS: u64 = 100;
 
@@ -273,6 +276,7 @@ fn phase2_poll_new(agent: &ureq::Agent, state: &mut State) -> u32 {
 
     let mut new_count = 0u32;
     let mut offset = 0u64;
+    let mut cycle_max = state.max_id;
 
     loop {
         let (offers, has_more) = fetch_page(agent, None, offset);
@@ -290,7 +294,7 @@ fn phase2_poll_new(agent: &ureq::Agent, state: &mut State) -> u32 {
                 continue;
             }
             all_old = false;
-            state.max_id = oid;
+            cycle_max = cycle_max.max(oid);
 
             let line = format_record(offer, oid);
             write_record(&mut out_file, &line);
@@ -304,6 +308,10 @@ fn phase2_poll_new(agent: &ureq::Agent, state: &mut State) -> u32 {
         }
         offset += PAGE_SIZE;
         std::thread::sleep(Duration::from_millis(POLL_DELAY_MS));
+    }
+
+    if new_count > 0 {
+        state.max_id = cycle_max;
     }
 
     new_count
