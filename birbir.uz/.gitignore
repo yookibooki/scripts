@@ -1,0 +1,9 @@
+# Rust build output
+target/
+
+# Generated data and state
+birbir_export.jsonl
+state.json
+
+# Logs
+monitor.log

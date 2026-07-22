@@ -1,12 +1,11 @@
-use olx_watch::*;
+use birbir_watch::*;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashSet, VecDeque};
 use std::fs;
 use std::io::Write;
 use std::time::Duration;
 
 const PAGE_SIZE: u64 = 40;
-const MAX_OFFSET: u64 = 1000;
+const MAX_PAGE: u64 = 10000; // safety upper bound
 const POLL_DELAY_MS: u64 = 100;
 
 // ── State ─────────────────────────────────────────────────────────────────
@@ -15,7 +14,6 @@ const POLL_DELAY_MS: u64 = 100;
 struct State {
     max_id: u64,
     initial_complete: bool,
-    known_categories: Vec<u64>,
 }
 
 fn state_path() -> String {
@@ -23,7 +21,7 @@ fn state_path() -> String {
 }
 
 fn output_path() -> String {
-    format!("{}/olx_export.jsonl", data_dir().display())
+    format!("{}/birbir_export.jsonl", data_dir().display())
 }
 
 fn load_state() -> State {
@@ -33,7 +31,6 @@ fn load_state() -> State {
         .unwrap_or(State {
             max_id: 0,
             initial_complete: false,
-            known_categories: Vec::new(),
         })
 }
 
@@ -49,58 +46,70 @@ fn save_state(state: &State) {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-fn extract_category_id(offer: &serde_json::Value) -> Option<u64> {
-    offer
-        .get("category")
-        .and_then(|c| c.get("id"))
-        .and_then(|v| v.as_u64())
+/// Extract the category path from a webUri.
+/// Example: "uz/toshkent/cat/telefonlar/smartfonlar/o/iphone-17-pro-270391997"
+///   → "telefonlar/smartfonlar"
+fn extract_category_path(web_uri: &str) -> String {
+    if let Some(cat_start) = web_uri.find("/cat/") {
+        let after_cat = &web_uri[cat_start + 5..];
+        if let Some(o_end) = after_cat.find("/o/") {
+            return after_cat[..o_end].to_string();
+        }
+    }
+    String::new()
 }
 
 fn format_record(offer: &serde_json::Value, oid: u64) -> String {
-    let url = offer.get("url").and_then(|v| v.as_str()).unwrap_or("");
+    let web_uri = offer
+        .get("webUri")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let url = if web_uri.is_empty() {
+        String::new()
+    } else {
+        format!("https://birbir.uz/{web_uri}")
+    };
+
     let title = offer
         .get("title")
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .trim();
-    let desc = offer
-        .get("description")
+
+    let price = offer
+        .get("price")
+        .and_then(|p| p.get("value"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    let currency = offer
+        .get("price")
+        .and_then(|p| p.get("currency"))
         .and_then(|v| v.as_str())
-        .map(strip_html)
-        .unwrap_or_default();
-    let price = format_price(offer);
+        .unwrap_or("UZS");
 
-    let category_type = offer
-        .get("category")
-        .and_then(|c| c.get("type"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-
-    let loc = |key: &str| -> &str {
-        offer
-            .get("location")
-            .and_then(|l| l.get(key))
-            .and_then(|v| v.get("name"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-    };
-
-    let last_refresh_time = offer
-        .get("last_refresh_time")
+    let city = offer
+        .get("region")
+        .and_then(|r| r.get("title"))
         .and_then(|v| v.as_str())
         .unwrap_or("");
+
+    let published_at = offer
+        .get("publishedAt")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    let category_path = extract_category_path(web_uri);
 
     let record = serde_json::json!({
         "id": oid,
         "url": url,
         "title": title,
-        "description": desc,
         "price": price,
-        "category_type": category_type,
-        "city": loc("city"),
-        "district": loc("district"),
-        "region": loc("region"),
-        "last_refresh_time": last_refresh_time,
+        "currency": currency,
+        "city": city,
+        "published_at": published_at,
+        "category_path": category_path,
     });
     serde_json::to_string(&record).unwrap()
 }
@@ -111,46 +120,70 @@ fn write_record(out_file: &mut fs::File, line: &str) {
     }
 }
 
-/// Flush the output file to ensure data is persisted to disk.
-fn flush_output(out_file: &mut fs::File) {
-    if let Err(e) = out_file.flush() {
-        eprintln!("[ERROR] Failed to flush export file: {e}");
-    }
-}
-
 // ── Pagination ──────────────────────────────────────────────────────────────
 
-/// Fetch one page of offers, optionally scoped to a category.
+/// Fetch one page of offers from the feed.
 /// Returns (offers, has_more).
 fn fetch_page(
     agent: &ureq::Agent,
-    category_id: Option<u64>,
-    offset: u64,
+    token: &str,
+    page: u64,
 ) -> (Vec<serde_json::Value>, bool) {
-    let url = match category_id {
-        Some(cid) => format!("{API}/?offset={offset}&limit={PAGE_SIZE}&category_id={cid}"),
-        None => format!("{API}/?offset={offset}&limit={PAGE_SIZE}"),
-    };
+    let url = format!("{API}/offer/feed");
+    let body = serde_json::json!({
+        "page": page,
+        "perPage": PAGE_SIZE,
+    });
 
-    let offers: Vec<serde_json::Value> = match fetch_json(agent, &url) {
-        Some(v) => match serde_json::from_value::<ApiResponse>(v) {
-            Ok(r) => r.data.unwrap_or_default(),
-            Err(e) => {
-                eprintln!("[ERROR] Parse error: {e}");
-                return (vec![], false);
-            }
-        },
+    let raw = match post_json(agent, &url, &body, token) {
+        Some(v) => v,
         None => return (vec![], false),
     };
 
-    let has_more = offers.len() >= PAGE_SIZE as usize;
+    let parsed: FeedResponse = match serde_json::from_value(raw) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[ERROR] Parse error: {e}");
+            return (vec![], false);
+        }
+    };
+
+    let content = match parsed.content {
+        Some(c) => c,
+        None => return (vec![], false),
+    };
+
+    let offers = content.items.unwrap_or_default();
+    let has_more = content
+        .paginator
+        .map(|p| p.next_page_exists)
+        .unwrap_or(false);
+
     (offers, has_more)
 }
 
-// ── Phase 1: Initial full collection via BFS over categories ────────────────
+// ── Token management ────────────────────────────────────────────────────────
+
+/// Fetch a fresh auth token or exit.
+fn obtain_token() -> String {
+    match extract_token() {
+        Some(t) => {
+            eprintln!("[INFO] Auth token obtained (len={})", t.len());
+            t
+        }
+        None => {
+            eprintln!("[ERROR] Failed to obtain auth token. Exiting.");
+            std::process::exit(1);
+        }
+    }
+}
+
+// ── Phase 1: Initial full collection ────────────────────────────────────────
 
 fn phase1_initial_collection(agent: &ureq::Agent, state: &mut State) {
     eprintln!("[INFO] === Phase 1: Initial full collection ===");
+
+    let token = obtain_token();
 
     let out_path = output_path();
     let mut out_file = match fs::File::create(&out_path) {
@@ -161,17 +194,17 @@ fn phase1_initial_collection(agent: &ureq::Agent, state: &mut State) {
         }
     };
 
-    let mut seen_ids: HashSet<u64> = HashSet::new();
-    let mut all_known_cats: HashSet<u64> = HashSet::new();
+    let mut seen_ids: std::collections::HashSet<u64> = std::collections::HashSet::new();
 
-    // ── Round 0: default listing (seed categories) ──
-    eprintln!("[INFO] Paginating default listing...");
-    let mut offset = 0u64;
+    let mut page = 1u64;
     loop {
-        let (offers, has_more) = fetch_page(agent, None, offset);
+        eprintln!("[INFO] Fetching page {page}...");
+        let (offers, has_more) = fetch_page(agent, &token, page);
         if offers.is_empty() {
+            eprintln!("[INFO] No offers on page {page}, done.");
             break;
         }
+
         for offer in &offers {
             let Some(oid) = extract_id(offer) else {
                 continue;
@@ -179,74 +212,24 @@ fn phase1_initial_collection(agent: &ureq::Agent, state: &mut State) {
             if !seen_ids.insert(oid) {
                 continue;
             }
-            if let Some(cid) = extract_category_id(offer) {
-                all_known_cats.insert(cid);
-            }
             if oid > state.max_id {
                 state.max_id = oid;
             }
             let line = format_record(offer, oid);
             write_record(&mut out_file, &line);
         }
-        flush_output(&mut out_file);
-        if !has_more {
+
+        if !has_more || page >= MAX_PAGE {
+            eprintln!(
+                "[INFO] Reached page limit or no more pages (page={page}, has_more={has_more})"
+            );
             break;
         }
-        offset += PAGE_SIZE;
-        std::thread::sleep(Duration::from_millis(POLL_DELAY_MS));
-    }
-
-    eprintln!(
-        "[INFO] Discovered {} categories, max_id = {}",
-        all_known_cats.len(),
-        state.max_id
-    );
-
-    // ── BFS: paginate each discovered category ──
-    let mut queue: VecDeque<u64> = all_known_cats.iter().copied().collect();
-    while let Some(cid) = queue.pop_front() {
-        eprintln!("[INFO] Paginating category {cid}...");
-        let mut offset = 0u64;
-        loop {
-            let (offers, has_more) = fetch_page(agent, Some(cid), offset);
-            if offers.is_empty() {
-                break;
-            }
-            for offer in &offers {
-                let Some(oid) = extract_id(offer) else {
-                    continue;
-                };
-                if !seen_ids.insert(oid) {
-                    continue;
-                }
-                if let Some(new_cid) = extract_category_id(offer) {
-                    if all_known_cats.insert(new_cid) {
-                        eprintln!("[INFO] Discovered new category {new_cid}");
-                        queue.push_back(new_cid);
-                    }
-                }
-                if oid > state.max_id {
-                    state.max_id = oid;
-                }
-                let line = format_record(offer, oid);
-                write_record(&mut out_file, &line);
-            }
-            flush_output(&mut out_file);
-            if !has_more || offset >= MAX_OFFSET {
-                break;
-            }
-            offset += PAGE_SIZE;
-            std::thread::sleep(Duration::from_millis(POLL_DELAY_MS));
-        }
+        page += 1;
         std::thread::sleep(Duration::from_millis(POLL_DELAY_MS));
     }
 
     state.initial_complete = true;
-    state.known_categories = {
-        let mut v: Vec<u64> = all_known_cats.into_iter().collect();
-        v.sort();
-        v
-    };
 
     eprintln!(
         "[INFO] Phase 1 complete: {} unique posts, max_id = {}",
@@ -258,6 +241,10 @@ fn phase1_initial_collection(agent: &ureq::Agent, state: &mut State) {
 // ── Phase 2: Ongoing poll for new posts ─────────────────────────────────────
 
 fn phase2_poll_new(agent: &ureq::Agent, state: &mut State) -> u32 {
+    let t0 = std::time::Instant::now();
+    let token = obtain_token();
+    eprintln!("[TIMING] obtain_token: {:?}", t0.elapsed());
+
     let out_path = output_path();
     let mut out_file = match fs::OpenOptions::new()
         .create(true)
@@ -272,10 +259,12 @@ fn phase2_poll_new(agent: &ureq::Agent, state: &mut State) -> u32 {
     };
 
     let mut new_count = 0u32;
-    let mut offset = 0u64;
+    let mut page = 1u64;
 
     loop {
-        let (offers, has_more) = fetch_page(agent, None, offset);
+        let t1 = std::time::Instant::now();
+        let (offers, has_more) = fetch_page(agent, &token, page);
+        eprintln!("[TIMING] fetch_page page={page}: {:?}", t1.elapsed());
         if offers.is_empty() {
             break;
         }
@@ -299,13 +288,15 @@ fn phase2_poll_new(agent: &ureq::Agent, state: &mut State) -> u32 {
 
         // If every post on this page was already known,
         // subsequent pages are even older — stop.
-        if all_old || !has_more || offset >= MAX_OFFSET {
+        if all_old || !has_more || page >= MAX_PAGE {
+            eprintln!("[TIMING] stopping: all_old={all_old} has_more={has_more} page={page}");
             break;
         }
-        offset += PAGE_SIZE;
+        page += 1;
         std::thread::sleep(Duration::from_millis(POLL_DELAY_MS));
     }
 
+    eprintln!("[TIMING] poll total: {:?}", t0.elapsed());
     new_count
 }
 
@@ -326,8 +317,6 @@ fn main() {
     let agent = ureq::Agent::config_builder()
         .user_agent(USER_AGENT)
         .http_status_as_error(false)
-        .timeout_connect(Some(Duration::from_secs(15)))
-        .timeout_global(Some(Duration::from_secs(30)))
         .build()
         .new_agent();
 
@@ -344,9 +333,7 @@ fn main() {
     // ── Ongoing poll (single cycle, or loop if POLL_INTERVAL is set) ──
     if poll_interval > 0 {
         // Daemon mode: loop forever
-        eprintln!(
-            "[INFO] Daemon mode started (poll interval = {poll_interval}ms)"
-        );
+        eprintln!("[INFO] Daemon mode started (poll interval = {poll_interval}ms)");
         loop {
             let n = phase2_poll_new(&agent, &mut state);
             if n > 0 {
