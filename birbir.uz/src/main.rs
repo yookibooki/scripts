@@ -239,6 +239,7 @@ fn phase2_poll_new(agent: &ureq::Agent, state: &mut State) -> u32 {
 
     let mut new_count = 0u32;
     let mut page = 1u64;
+    let old_max = state.max_id;
 
     loop {
         let t1 = std::time::Instant::now();
@@ -254,11 +255,13 @@ fn phase2_poll_new(agent: &ureq::Agent, state: &mut State) -> u32 {
             let Some(oid) = extract_id(offer) else {
                 continue;
             };
-            if oid <= state.max_id {
+            if oid <= old_max {
                 continue;
             }
             all_old = false;
-            state.max_id = oid;
+            if oid > state.max_id {
+                state.max_id = oid;
+            }
 
             let line = trim_offer(offer);
             write_record(&mut out_file, &line);
