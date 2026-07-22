@@ -1,17 +1,17 @@
 - Rust toolchain required; build with `cargo build --release`
-- Library `src/lib.rs` — shared utilities (`extract_token`, `fetch_json`, `post_json`, `extract_id`, `data_dir`, `FeedResponse`)
+- Library `src/lib.rs` -- shared utilities (`extract_token`, `fetch_json`, `post_json`, `extract_id`, `data_dir`, `FeedResponse`)
 - Binary `birbir-watch` in `src/main.rs` (deps: ureq, serde, serde_json)
   - Timer-triggered one-shot (not a long-running daemon). Systemd timer fires every 30 min at `:05/:35`.
   - Auth: Bearer token extracted from session cookie via `curl | direct HTTP` (with retry). JWT expiry checked before use. Auto-refresh on 401.
   - Phase 1: paginates ALL offers from BirBir API via `POST /offer/feed` until `nextPageExists=false` (no cap).
   - Phase 2: polls page 1, appends records with `id > max_id`, breaks on first all-old page.
   - State: `~/.local/share/birbir/state.json` (JSON: `max_id` + `initial_complete` flag)
-  - Output: `~/.local/share/birbir/birbir_export.jsonl` — JSON Lines format, 9 fields
-  - Fields: `id`, `url`, `title`, `price`, `currency`, `city`, `published_at`, `category_path`
+  - Output: `~/.local/share/birbir/birbir_export.jsonl` -- JSON Lines, each line a trimmed offer object
+  - Fields kept: `id`, `title`, `price`, `publishedAt`, `webUri`, `urgentSale`, `courierDelivery`, `business`, `agency`, `closed`, `titlePath`, `coordinates`, `seller_uuid`, `seller_name`, `seller_verified`, `seller_business`, `seller_agency`, `seller_offerActiveCount`
   - `POLL_INTERVAL` env var supported for daemon mode (default: one-shot via systemd).
 - Data dir: `~/.local/share/birbir/` (also caches `token.txt` here)
 - Error logging: `[ERROR]` and `[WARN]` prefixed messages on stderr
-- Service: `~/.config/systemd/user/birbir-watch.service` — `Type=oneshot`, `After=network-online.target`
-- Timer: `~/.config/systemd/user/birbir-watch.timer` — `OnCalendar=*:5/30` (staggered 5min after OLX timer)
+- Service: `~/.config/systemd/user/birbir-watch.service` -- `Type=oneshot`, `After=network-online.target`
+- Timer: `~/.config/systemd/user/birbir-watch.timer` -- `OnCalendar=*:5/30` (staggered 5min after OLX timer)
 - Manage with: `systemctl --user {start,stop,restart,status} birbir-watch.service` or `birbir-watch.timer`
 - Logs: `journalctl --user -u birbir-watch.service -f`

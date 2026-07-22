@@ -57,58 +57,6 @@ pub fn fetch_json(agent: &ureq::Agent, url: &str) -> Option<serde_json::Value> {
     None
 }
 
-/// Remove HTML tags and collapse whitespace.
-pub fn strip_html(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len());
-    let mut in_tag = false;
-    for ch in raw.chars() {
-        match ch {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag => out.push(ch),
-            _ => {}
-        }
-    }
-    let mut collapsed = String::with_capacity(out.len());
-    let mut prev_space = false;
-    for ch in out.chars() {
-        if ch.is_whitespace() {
-            if !prev_space {
-                collapsed.push(' ');
-                prev_space = true;
-            }
-        } else {
-            collapsed.push(ch);
-            prev_space = false;
-        }
-    }
-    collapsed.trim().to_string()
-}
-
-/// Extract the price from an offer's params array.
-pub fn format_price(offer: &serde_json::Value) -> String {
-    if let Some(params) = offer.get("params").and_then(|v| v.as_array()) {
-        for p in params {
-            if p.get("key").and_then(|v| v.as_str()) == Some("price") {
-                if let Some(val) = p.get("value") {
-                    if val.is_object() {
-                        if let Some(v) = val.get("value") {
-                            if let Some(s) = v.as_str() {
-                                return s.to_string();
-                            }
-                            if let Some(n) = v.as_f64() {
-                                return format!("{}", n as u64);
-                            }
-                        }
-                    }
-                }
-                break;
-            }
-        }
-    }
-    "-".to_string()
-}
-
 /// Extract the numeric ID from an offer.
 pub fn extract_id(offer: &serde_json::Value) -> Option<u64> {
     offer.get("id").and_then(|v| v.as_u64())

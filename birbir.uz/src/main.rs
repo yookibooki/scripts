@@ -46,72 +46,50 @@ fn save_state(state: &State) {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-/// Extract the category path from a webUri.
-/// Example: "uz/toshkent/cat/telefonlar/smartfonlar/o/iphone-17-pro-270391997"
-///   → "telefonlar/smartfonlar"
-fn extract_category_path(web_uri: &str) -> String {
-    if let Some(cat_start) = web_uri.find("/cat/") {
-        let after_cat = &web_uri[cat_start + 5..];
-        if let Some(o_end) = after_cat.find("/o/") {
-            return after_cat[..o_end].to_string();
+/// Strip noise from a raw API offer, keeping only useful fields — flat format.
+fn trim_offer(offer: &serde_json::Value) -> String {
+    use serde_json::map::Map;
+
+    let mut r = Map::new();
+
+    // Top-level fields worth keeping
+    for key in &["id", "title", "price", "publishedAt", "webUri",
+                 "urgentSale", "courierDelivery", "business", "agency", "closed"]
+    {
+        if let Some(v) = offer.get(*key) {
+            r.insert(key.to_string(), v.clone());
         }
     }
-    String::new()
-}
 
-fn format_record(offer: &serde_json::Value, oid: u64) -> String {
-    let web_uri = offer
-        .get("webUri")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let url = if web_uri.is_empty() {
-        String::new()
-    } else {
-        format!("https://birbir.uz/{web_uri}")
-    };
+    // Region: flatten titlePath + coordinates
+    if let Some(region) = offer.get("region") {
+        if let Some(tp) = region.get("titlePath") {
+            r.insert("titlePath".to_string(), tp.clone());
+        }
+        if let Some(loc) = region.get("location") {
+            if let Some(coords) = loc.get("coordinates") {
+                r.insert("coordinates".to_string(), coords.clone());
+            }
+        }
+    }
 
-    let title = offer
-        .get("title")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim();
+    // Seller: flatten to flat keys (seller_*)
+    if let Some(seller) = offer.get("seller") {
+        for (flat, src) in &[
+            ("seller_uuid", "uuid"),
+            ("seller_name", "name"),
+            ("seller_verified", "verified"),
+            ("seller_business", "business"),
+            ("seller_agency", "agency"),
+            ("seller_offerActiveCount", "offerActiveCount"),
+        ] {
+            if let Some(v) = seller.get(*src) {
+                r.insert(flat.to_string(), v.clone());
+            }
+        }
+    }
 
-    let price = offer
-        .get("price")
-        .and_then(|p| p.get("value"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-
-    let currency = offer
-        .get("price")
-        .and_then(|p| p.get("currency"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("UZS");
-
-    let city = offer
-        .get("region")
-        .and_then(|r| r.get("title"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-
-    let published_at = offer
-        .get("publishedAt")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-
-    let category_path = extract_category_path(web_uri);
-
-    let record = serde_json::json!({
-        "id": oid,
-        "url": url,
-        "title": title,
-        "price": price,
-        "currency": currency,
-        "city": city,
-        "published_at": published_at,
-        "category_path": category_path,
-    });
-    serde_json::to_string(&record).unwrap()
+    serde_json::to_string(&serde_json::Value::Object(r)).unwrap()
 }
 
 fn write_record(out_file: &mut fs::File, line: &str) {
@@ -216,7 +194,7 @@ fn phase1_initial_collection(agent: &ureq::Agent, state: &mut State) {
             if oid > state.max_id {
                 state.max_id = oid;
             }
-            let line = format_record(offer, oid);
+            let line = trim_offer(offer);
             write_record(&mut out_file, &line);
         }
 
@@ -282,7 +260,7 @@ fn phase2_poll_new(agent: &ureq::Agent, state: &mut State) -> u32 {
             all_old = false;
             state.max_id = oid;
 
-            let line = format_record(offer, oid);
+            let line = trim_offer(offer);
             write_record(&mut out_file, &line);
             new_count += 1;
         }

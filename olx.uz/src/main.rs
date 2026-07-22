@@ -59,53 +59,58 @@ fn extract_category_id(offer: &serde_json::Value) -> Option<u64> {
         .and_then(|v| v.as_u64())
 }
 
-fn format_record(offer: &serde_json::Value, oid: u64) -> String {
-    let url = offer.get("url").and_then(|v| v.as_str()).unwrap_or("");
-    let title = offer
-        .get("title")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim();
-    let desc = offer
-        .get("description")
-        .and_then(|v| v.as_str())
-        .map(strip_html)
-        .unwrap_or_default();
-    let price = format_price(offer);
+fn trim_offer(offer: &serde_json::Value) -> String {
+    use serde_json::map::Map;
 
-    let category_type = offer
-        .get("category")
-        .and_then(|c| c.get("type"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let mut r = Map::new();
 
-    let loc = |key: &str| -> &str {
-        offer
-            .get("location")
-            .and_then(|l| l.get(key))
-            .and_then(|v| v.get("name"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-    };
+    // Top-level keepers
+    for key in &["id", "url", "title", "business", "created_time", "last_refresh_time"] {
+        if let Some(v) = offer.get(*key) {
+            r.insert(key.to_string(), v.clone());
+        }
+    }
 
-    let last_refresh_time = offer
-        .get("last_refresh_time")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    // Price: only converted_value in UZS
+    if let Some(params) = offer.get("params").and_then(|v| v.as_array()) {
+        for p in params {
+            if p.get("key").and_then(|v| v.as_str()) == Some("price") {
+                if let Some(cv) = p.get("value").and_then(|v| v.get("converted_value")).and_then(|v| v.as_f64()) {
+                    r.insert("price_uzs".to_string(), serde_json::json!(cv as u64));
+                }
+                break;
+            }
+        }
+    }
 
-    let record = serde_json::json!({
-        "id": oid,
-        "url": url,
-        "title": title,
-        "description": desc,
-        "price": price,
-        "category_type": category_type,
-        "city": loc("city"),
-        "district": loc("district"),
-        "region": loc("region"),
-        "last_refresh_time": last_refresh_time,
-    });
-    serde_json::to_string(&record).unwrap()
+    // Category: only type
+    if let Some(cat) = offer.get("category") {
+        if let Some(typ) = cat.get("type").and_then(|v| v.as_str()) {
+            r.insert("category_type".to_string(), serde_json::json!(typ));
+        }
+    }
+
+    // Location: flat name fields
+    if let Some(loc) = offer.get("location") {
+        for (flat, src) in &[("location_city", "city"), ("location_district", "district"), ("location_region", "region")] {
+            if let Some(v) = loc.get(*src) {
+                if let Some(name) = v.get("name").and_then(|n| n.as_str()) {
+                    r.insert(flat.to_string(), serde_json::json!(name));
+                }
+            }
+        }
+    }
+
+    // Map: flat coordinates array [lon, lat]
+    if let Some(m) = offer.get("map") {
+        let lat = m.get("lat").and_then(|v| v.as_f64());
+        let lon = m.get("lon").and_then(|v| v.as_f64());
+        if let (Some(lat), Some(lon)) = (lat, lon) {
+            r.insert("coordinates".to_string(), serde_json::json!([lon, lat]));
+        }
+    }
+
+    serde_json::to_string(&serde_json::Value::Object(r)).unwrap()
 }
 
 fn write_record(out_file: &mut fs::File, line: &str) {
@@ -188,7 +193,7 @@ fn phase1_initial_collection(agent: &ureq::Agent, state: &mut State) {
             if oid > state.max_id {
                 state.max_id = oid;
             }
-            let line = format_record(offer, oid);
+            let line = trim_offer(offer);
             write_record(&mut out_file, &line);
         }
         flush_output(&mut out_file);
@@ -231,7 +236,7 @@ fn phase1_initial_collection(agent: &ureq::Agent, state: &mut State) {
                 if oid > state.max_id {
                     state.max_id = oid;
                 }
-                let line = format_record(offer, oid);
+                let line = trim_offer(offer);
                 write_record(&mut out_file, &line);
             }
             flush_output(&mut out_file);
@@ -296,7 +301,7 @@ fn phase2_poll_new(agent: &ureq::Agent, state: &mut State) -> u32 {
             all_old = false;
             cycle_max = cycle_max.max(oid);
 
-            let line = format_record(offer, oid);
+            let line = trim_offer(offer);
             write_record(&mut out_file, &line);
             new_count += 1;
         }
