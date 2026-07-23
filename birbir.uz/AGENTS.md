@@ -1,17 +1,68 @@
-- Rust toolchain required; build with `cargo build --release`
-- Library `src/lib.rs` -- shared utilities (`extract_token`, `fetch_json`, `post_json`, `extract_id`, `data_dir`, `FeedResponse`)
-- Binary `birbir-watch` in `src/main.rs` (deps: ureq, serde, serde_json)
-  - Timer-triggered one-shot (not a long-running daemon). Systemd timer fires every 30 min at `:05/:35`.
-  - Auth: Bearer token extracted from session cookie via `curl | direct HTTP` (with retry). JWT expiry checked before use. Auto-refresh on 401.
-  - Phase 1: paginates ALL offers from BirBir API via `POST /offer/feed` until `nextPageExists=false` (no cap).
-  - Phase 2: polls page 1, appends records with `id > max_id`, breaks on first all-old page.
-  - State: `~/.local/share/birbir/state.json` (JSON: `max_id` + `initial_complete` flag)
-  - Output: `~/.local/share/birbir/birbir_export.jsonl` -- JSON Lines, each line a trimmed offer object
-  - Fields kept: `id`, `title`, `price`, `publishedAt`, `webUri`, `urgentSale`, `courierDelivery`, `business`, `agency`, `closed`, `titlePath`, `coordinates`, `seller_uuid`, `seller_name`, `seller_verified`, `seller_business`, `seller_agency`, `seller_offerActiveCount`
-  - `POLL_INTERVAL` env var supported for daemon mode (default: one-shot via systemd).
-- Data dir: `~/.local/share/birbir/` (also caches `token.txt` here)
-- Error logging: `[ERROR]` and `[WARN]` prefixed messages on stderr
-- Service: `~/.config/systemd/user/birbir-watch.service` -- `Type=oneshot`, `After=network-online.target`
-- Timer: `~/.config/systemd/user/birbir-watch.timer` -- `OnCalendar=*:5/30` (staggered 5min after OLX timer)
-- Manage with: `systemctl --user {start,stop,restart,status} birbir-watch.service` or `birbir-watch.timer`
-- Logs: `journalctl --user -u birbir-watch.service -f`
+# BirBir Watch
+## Purpose
+Collect all BirBir.uz offers once, then append only newly created offers to a JSONL export.
+
+## Build
+```bash
+cargo build --release
+```
+
+## Architecture
+* `src/main.rs` — collector logic.
+* `src/lib.rs` — auth, HTTP, models, helpers.
+
+## Auth
+* Bearer token comes from BirBir session cookie.
+* Cached in `~/.local/share/birbir/token.txt`.
+* Validate JWT expiry before use.
+* Refresh on 401.
+
+## Collection Rules
+### Initial run
+* Fetch every page from `POST /offer/feed` until `nextPageExists=false`.
+* Export unique offers.
+* Track highest seen ID.
+
+### Subsequent runs
+* Start at page 1.
+* Export offers with `id > max_id`.
+* Stop when a page contains only known IDs.
+
+## Persistence
+Directory: `~/.local/share/birbir/`
+
+Files:
+
+* `state.json` → `{ max_id, initial_complete }`
+* `birbir_export.jsonl` → exported offers
+* `token.txt` → cached auth token
+
+## Exported Fields
+Offer:
+`id,title,price,publishedAt,webUri,urgentSale,courierDelivery,business,agency,closed`
+
+Region:
+`titlePath,coordinates`
+
+Seller:
+`uuid,name,verified,business,agency,offerActiveCount`
+
+## State Schema
+
+```json
+{
+  "version": 1,
+  "max_id": 123,
+  "initial_complete": true
+}
+```
+
+Missing `version` field is treated as version 1.
+
+## Operational Invariants
+
+* Export file is append-only.
+* `max_id` must never decrease.
+* State writes are atomic (write to `.tmp`, then `rename`).
+* Only one instance may run at a time (enforced via `flock`).
+* Initial collection must complete before incremental polling begins.

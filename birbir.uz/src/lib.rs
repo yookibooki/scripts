@@ -23,6 +23,8 @@ pub struct FeedContent {
 pub struct Paginator {
     pub step: u64,
     pub current: u64,
+    // BirBir API signals whether more pages exist via this field.
+    // This is an external API contract, not an internal design choice.
     #[serde(rename = "nextPageExists")]
     pub next_page_exists: bool,
 }
@@ -162,17 +164,11 @@ pub fn extract_token() -> Option<String> {
         }
     }
 
-    // Last resort: try direct HTTP (retries with backoff)
-    for attempt in 0..5 {
-        if attempt > 0 {
-            eprintln!("[INFO] Retrying direct HTTP session fetch (attempt {})...", attempt + 1);
-            std::thread::sleep(std::time::Duration::from_millis(1000 * attempt));
-        }
-        eprintln!("[INFO] Trying direct HTTP session fetch...");
-        if let Some(token) = direct_token_fetch() {
-            cache_token(&token);
-            return Some(token);
-        }
+    // Last resort: try direct HTTP (retries with backoff handled inside direct_token_fetch)
+    eprintln!("[INFO] Trying direct HTTP session fetch...");
+    if let Some(token) = direct_token_fetch() {
+        cache_token(&token);
+        return Some(token);
     }
     None
 }
@@ -399,6 +395,74 @@ pub fn post_json(
         eprintln!("[WARN] HTTP {status}: {preview}");
     }
     None
+}
+
+// ── 401 detection ─────────────────────────────────────────────────────
+
+/// POST JSON and return `Err(true)` specifically when the server replies 401.
+/// `Err(false)` means some other transient error; `Ok(val)` is success.
+///
+/// HTTP 401 indicates an expired token — this is the BirBir API's mechanism
+/// for signalling that a new session token is needed. This is an external API
+/// contract, not an internal design choice.
+pub fn post_json_401(
+    agent: &ureq::Agent,
+    url: &str,
+    body: &serde_json::Value,
+    token: &str,
+) -> Result<Option<serde_json::Value>, bool> {
+    for attempt in 0..3 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(500 * attempt));
+        }
+
+        let mut resp = match agent
+            .post(url)
+            .header("Authorization", &format!("Bearer {token}"))
+            .header("Accept", "application/json")
+            .header("Referer", ORIGIN)
+            .send_json(body)
+        {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("[ERROR] HTTP POST failed: {e}");
+                continue;
+            }
+        };
+
+        let status = resp.status().as_u16();
+        if status == 200 {
+            let text = match resp.body_mut().read_to_string() {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("[ERROR] Failed to read response body: {e}");
+                    continue;
+                }
+            };
+            return match serde_json::from_str(&text) {
+                Ok(v) => Ok(Some(v)),
+                Err(e) => {
+                    eprintln!("[ERROR] JSON parse error: {e}");
+                    Ok(None)
+                }
+            };
+        }
+
+        if status == 401 {
+            eprintln!("[WARN] HTTP 401 — token expired, invalidating cache");
+            invalidate_cached_token();
+            return Err(true);
+        }
+
+        let text = resp.body_mut().read_to_string().unwrap_or_default();
+        let preview = if text.is_empty() {
+            "(empty)"
+        } else {
+            &text[..text.len().min(200)]
+        };
+        eprintln!("[WARN] HTTP {status}: {preview}");
+    }
+    Err(false)
 }
 
 // ── Offer helpers ──────────────────────────────────────────────────────

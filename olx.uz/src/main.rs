@@ -1,21 +1,52 @@
 use olx_watch::*;
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashSet, VecDeque};
 use std::fs;
 use std::io::Write;
 use std::time::Duration;
 
-// Note: the API rejects limit values > 50 but always returns 52 items per page.
-// PAGE_SIZE is set to 50 (the max the API allows) and used as the offset step
-// to advance one full page at a time.
+// OLX API contracts (external behaviors, not internal design choices):
+// - The API rejects limit values > 50 but always returns ~52 items per page.
+//   PAGE_SIZE is set to 50 (the max the API allows) and used as the offset step
+//   to advance one full page at a time.
+// - The API enforces a hard cap: queries beyond offset=1000 return empty results.
+//   Each category is paginated independently so each gets its own 1000-offset budget.
 const PAGE_SIZE: u64 = 50;
 const MAX_OFFSET: u64 = 1000;
 const POLL_DELAY_MS: u64 = 100;
 
+// ── Lock file ──────────────────────────────────────────────────────────────
+
+/// Acquire an exclusive lock on the data directory.
+/// Exits immediately if another instance already holds the lock.
+fn acquire_lock() -> fs::File {
+    let dir = data_dir();
+    let path = dir.join("olx.lock");
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .read(true)
+        .open(&path)
+        .unwrap_or_else(|e| {
+            eprintln!("[ERROR] Failed to open lock file {}: {e}", path.display());
+            std::process::exit(1);
+        });
+    if let Err(e) = file.try_lock_exclusive() {
+        eprintln!("[ERROR] Another instance is already running (lock: {e}). Exiting.");
+        std::process::exit(1);
+    }
+    file
+}
+
 // ── State ─────────────────────────────────────────────────────────────────
+
+fn default_version() -> u64 { 1 }
 
 #[derive(Serialize, Deserialize)]
 struct State {
+    #[serde(default = "default_version")]
+    version: u64,
     max_id: u64,
     initial_complete: bool,
     known_categories: Vec<u64>,
@@ -34,6 +65,7 @@ fn load_state() -> State {
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or(State {
+            version: 1,
             max_id: 0,
             initial_complete: false,
             known_categories: Vec::new(),
@@ -113,6 +145,46 @@ fn trim_offer(offer: &serde_json::Value) -> String {
     serde_json::to_string(&serde_json::Value::Object(r)).unwrap()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_state_load_missing() {
+        let state = serde_json::from_str::<State>("")
+            .unwrap_or(State { version: 1, max_id: 0, initial_complete: false, known_categories: Vec::new() });
+        assert_eq!(state.version, 1);
+        assert_eq!(state.max_id, 0);
+        assert!(!state.initial_complete);
+        assert!(state.known_categories.is_empty());
+    }
+
+    #[test]
+    fn test_state_load_legacy_no_version() {
+        let json = r#"{"max_id": 42, "initial_complete": true, "known_categories": [1, 2, 3]}"#;
+        let state: State = serde_json::from_str(json).unwrap();
+        assert_eq!(state.version, 1);
+        assert_eq!(state.max_id, 42);
+        assert!(state.initial_complete);
+        assert_eq!(state.known_categories, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_state_load_current_with_version() {
+        let json = r#"{"version": 1, "max_id": 99, "initial_complete": false, "known_categories": []}"#;
+        let state: State = serde_json::from_str(json).unwrap();
+        assert_eq!(state.version, 1);
+        assert_eq!(state.max_id, 99);
+        assert!(!state.initial_complete);
+    }
+
+    #[test]
+    fn test_state_load_corrupted() {
+        let result = serde_json::from_str::<State>("{broken json}");
+        assert!(result.is_err());
+    }
+}
+
 fn write_record(out_file: &mut fs::File, line: &str) {
     if let Err(e) = writeln!(out_file, "{line}") {
         eprintln!("[ERROR] Failed to write to export file: {e}");
@@ -136,8 +208,8 @@ fn fetch_page(
     offset: u64,
 ) -> (Vec<serde_json::Value>, bool) {
     let url = match category_id {
-        Some(cid) => format!("{API}/?offset={offset}&limit={PAGE_SIZE}&category_id={cid}"),
-        None => format!("{API}/?offset={offset}&limit={PAGE_SIZE}"),
+        Some(cid) => format!("{API}/?offset={offset}&limit={PAGE_SIZE}&category_id={cid}&sort_by=created_at:desc"),
+        None => format!("{API}/?offset={offset}&limit={PAGE_SIZE}&sort_by=created_at:desc"),
     };
 
     let offers: Vec<serde_json::Value> = match fetch_json(agent, &url) {
@@ -331,10 +403,19 @@ fn main() {
         std::process::exit(1);
     }
 
+    let _lock = acquire_lock();
+
     let poll_interval: u64 = std::env::var("POLL_INTERVAL")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
+
+    eprintln!("[INFO] Data directory: {}", dir.display());
+    if poll_interval > 0 {
+        eprintln!("[INFO] Mode: daemon (poll interval = {poll_interval}ms)");
+    } else {
+        eprintln!("[INFO] Mode: oneshot");
+    }
 
     let agent = ureq::Agent::config_builder()
         .user_agent(USER_AGENT)
@@ -345,6 +426,7 @@ fn main() {
         .new_agent();
 
     let mut state = load_state();
+    eprintln!("[INFO] State version: {}", state.version);
 
     if !state.initial_complete {
         // ── Full initial dump ──
@@ -362,18 +444,14 @@ fn main() {
         );
         loop {
             let n = phase2_poll_new(&agent, &mut state);
-            if n > 0 {
-                save_state(&state);
-            }
+            save_state(&state);
             eprintln!("[INFO] Poll: {n} new posts (max_id = {})", state.max_id);
             std::thread::sleep(Duration::from_millis(poll_interval));
         }
     } else {
         // Oneshot mode: single poll cycle
         let n = phase2_poll_new(&agent, &mut state);
-        if n > 0 {
-            save_state(&state);
-        }
+        save_state(&state);
         eprintln!("[INFO] Poll: {n} new posts (max_id = {})", state.max_id);
     }
 }

@@ -1,17 +1,54 @@
 use birbir_watch::*;
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
 use std::time::Duration;
 
 const PAGE_SIZE: u64 = 40;
-const MAX_PAGE: u64 = 10000; // safety upper bound
+// Safety upper bound — BirBir API pagination is governed by the
+// nextPageExists field in the feed response; this exists only as a
+// defence-in-depth limit against runaway pagination.
+const MAX_PAGE: u64 = 10000;
 const POLL_DELAY_MS: u64 = 100;
+
+// ── Lock file ──────────────────────────────────────────────────────────────
+
+/// Acquire an exclusive lock on the data directory.
+/// Exits immediately if another instance already holds the lock.
+fn acquire_lock() -> fs::File {
+    let dir = data_dir();
+    let path = dir.join("birbir.lock");
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .read(true)
+        .open(&path)
+        .unwrap_or_else(|e| {
+            eprintln!("[ERROR] Failed to open lock file {}: {e}", path.display());
+            std::process::exit(1);
+        });
+    if let Err(e) = file.try_lock_exclusive() {
+        eprintln!("[ERROR] Another instance is already running (lock: {e}). Exiting.");
+        std::process::exit(1);
+    }
+    file
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TokenStatus {
+    Ok,
+    Expired,
+}
 
 // ── State ─────────────────────────────────────────────────────────────────
 
+fn default_version() -> u64 { 1 }
+
 #[derive(Serialize, Deserialize)]
 struct State {
+    #[serde(default = "default_version")]
+    version: u64,
     max_id: u64,
     initial_complete: bool,
 }
@@ -29,6 +66,7 @@ fn load_state() -> State {
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or(State {
+            version: 1,
             max_id: 0,
             initial_complete: false,
         })
@@ -92,6 +130,44 @@ fn trim_offer(offer: &serde_json::Value) -> String {
     serde_json::to_string(&serde_json::Value::Object(r)).unwrap()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_state_load_missing() {
+        let state = serde_json::from_str::<State>("")
+            .unwrap_or(State { version: 1, max_id: 0, initial_complete: false });
+        assert_eq!(state.version, 1);
+        assert_eq!(state.max_id, 0);
+        assert!(!state.initial_complete);
+    }
+
+    #[test]
+    fn test_state_load_legacy_no_version() {
+        let json = r#"{"max_id": 42, "initial_complete": true}"#;
+        let state: State = serde_json::from_str(json).unwrap();
+        assert_eq!(state.version, 1);
+        assert_eq!(state.max_id, 42);
+        assert!(state.initial_complete);
+    }
+
+    #[test]
+    fn test_state_load_current_with_version() {
+        let json = r#"{"version": 1, "max_id": 99, "initial_complete": false}"#;
+        let state: State = serde_json::from_str(json).unwrap();
+        assert_eq!(state.version, 1);
+        assert_eq!(state.max_id, 99);
+        assert!(!state.initial_complete);
+    }
+
+    #[test]
+    fn test_state_load_corrupted() {
+        let result = serde_json::from_str::<State>("{broken json}");
+        assert!(result.is_err());
+    }
+}
+
 fn write_record(out_file: &mut fs::File, line: &str) {
     if let Err(e) = writeln!(out_file, "{line}") {
         eprintln!("[ERROR] Failed to write to export file: {e}");
@@ -101,35 +177,38 @@ fn write_record(out_file: &mut fs::File, line: &str) {
 // ── Pagination ──────────────────────────────────────────────────────────────
 
 /// Fetch one page of offers from the feed.
-/// Returns (offers, has_more).
+/// Returns (offers, has_more, token_status).
 fn fetch_page(
     agent: &ureq::Agent,
     token: &str,
     page: u64,
-) -> (Vec<serde_json::Value>, bool) {
+) -> (Vec<serde_json::Value>, bool, TokenStatus) {
     let url = format!("{API}/offer/feed");
     let body = serde_json::json!({
         "page": page,
         "perPage": PAGE_SIZE,
         "region": "all",
+        "sort": 2,
     });
 
-    let raw = match post_json(agent, &url, &body, token) {
-        Some(v) => v,
-        None => return (vec![], false),
+    let raw = match post_json_401(agent, &url, &body, token) {
+        Ok(Some(v)) => v,
+        Ok(None) => return (vec![], false, TokenStatus::Ok),
+        Err(true) => return (vec![], false, TokenStatus::Expired),
+        Err(false) => return (vec![], false, TokenStatus::Ok),
     };
 
     let parsed: FeedResponse = match serde_json::from_value(raw) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("[ERROR] Parse error: {e}");
-            return (vec![], false);
+            return (vec![], false, TokenStatus::Ok);
         }
     };
 
     let content = match parsed.content {
         Some(c) => c,
-        None => return (vec![], false),
+        None => return (vec![], false, TokenStatus::Ok),
     };
 
     let offers = content.items.unwrap_or_default();
@@ -138,7 +217,7 @@ fn fetch_page(
         .map(|p| p.next_page_exists)
         .unwrap_or(false);
 
-    (offers, has_more)
+    (offers, has_more, TokenStatus::Ok)
 }
 
 // ── Token management ────────────────────────────────────────────────────────
@@ -162,7 +241,7 @@ fn obtain_token() -> String {
 fn phase1_initial_collection(agent: &ureq::Agent, state: &mut State) {
     eprintln!("[INFO] === Phase 1: Initial full collection ===");
 
-    let token = obtain_token();
+    let mut token = obtain_token();
 
     let out_path = output_path();
     let mut out_file = match fs::File::create(&out_path) {
@@ -178,7 +257,14 @@ fn phase1_initial_collection(agent: &ureq::Agent, state: &mut State) {
     let mut page = 1u64;
     loop {
         eprintln!("[INFO] Fetching page {page}...");
-        let (offers, has_more) = fetch_page(agent, &token, page);
+        let (offers, has_more, status) = fetch_page(agent, &token, page);
+
+        if status == TokenStatus::Expired {
+            eprintln!("[INFO] Token expired during phase 1, refreshing...");
+            token = obtain_token();
+            continue; // retry same page with fresh token
+        }
+
         if offers.is_empty() {
             eprintln!("[INFO] No offers on page {page}, done.");
             break;
@@ -221,7 +307,7 @@ fn phase1_initial_collection(agent: &ureq::Agent, state: &mut State) {
 
 fn phase2_poll_new(agent: &ureq::Agent, state: &mut State) -> u32 {
     let t0 = std::time::Instant::now();
-    let token = obtain_token();
+    let mut token = obtain_token();
     eprintln!("[TIMING] obtain_token: {:?}", t0.elapsed());
 
     let out_path = output_path();
@@ -243,8 +329,15 @@ fn phase2_poll_new(agent: &ureq::Agent, state: &mut State) -> u32 {
 
     loop {
         let t1 = std::time::Instant::now();
-        let (offers, has_more) = fetch_page(agent, &token, page);
+        let (offers, has_more, status) = fetch_page(agent, &token, page);
         eprintln!("[TIMING] fetch_page page={page}: {:?}", t1.elapsed());
+
+        if status == TokenStatus::Expired {
+            eprintln!("[INFO] Token expired during poll, refreshing...");
+            token = obtain_token();
+            continue; // retry same page with fresh token
+        }
+
         if offers.is_empty() {
             break;
         }
@@ -291,10 +384,19 @@ fn main() {
         std::process::exit(1);
     }
 
+    let _lock = acquire_lock();
+
     let poll_interval: u64 = std::env::var("POLL_INTERVAL")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
+
+    eprintln!("[INFO] Data directory: {}", dir.display());
+    if poll_interval > 0 {
+        eprintln!("[INFO] Mode: daemon (poll interval = {poll_interval}ms)");
+    } else {
+        eprintln!("[INFO] Mode: oneshot");
+    }
 
     let agent = ureq::Agent::config_builder()
         .user_agent(USER_AGENT)
@@ -303,6 +405,7 @@ fn main() {
         .new_agent();
 
     let mut state = load_state();
+    eprintln!("[INFO] State version: {}", state.version);
 
     if !state.initial_complete {
         // ── Full initial dump ──
@@ -318,18 +421,14 @@ fn main() {
         eprintln!("[INFO] Daemon mode started (poll interval = {poll_interval}ms)");
         loop {
             let n = phase2_poll_new(&agent, &mut state);
-            if n > 0 {
-                save_state(&state);
-            }
+            save_state(&state);
             eprintln!("[INFO] Poll: {n} new posts (max_id = {})", state.max_id);
             std::thread::sleep(Duration::from_millis(poll_interval));
         }
     } else {
         // Oneshot mode: single poll cycle
         let n = phase2_poll_new(&agent, &mut state);
-        if n > 0 {
-            save_state(&state);
-        }
+        save_state(&state);
         eprintln!("[INFO] Poll: {n} new posts (max_id = {})", state.max_id);
     }
 }

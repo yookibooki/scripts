@@ -1,24 +1,6 @@
 # OLX.uz Market Data Collector
 
-Collects all listings from [OLX.uz](https://www.olx.uz) into a machine-readable archive — fully history, ongoing updates, no deletions.
-
-## Stack
-
-- **Rust** — single compiled binary, ~3 MB RSS at runtime
-- **ureq** — lightweight HTTP client
-- **serde** / **serde_json** — JSON serialization
-
-## How it works
-
-The system has two phases:
-
-### Phase 1 — Initial full dump (automatic, one-time)
-
-On first run, it discovers all categories via BFS and paginates through every single one (bypassing the API's 1000-offset-per-query cap by scoping requests to individual `category_id`). This collects every currently active listing.
-
-### Phase 2 — Ongoing poll (every 30 minutes)
-
-Each subsequent run polls the default listing (newest-first), identifies new posts by tracking the highest seen ID, and appends them to the same file. Nothing is ever deleted.
+Collects all listings from [OLX.uz](https://www.olx.uz) into a machine-readable archive — full history, ongoing updates, no deletions.
 
 ## Output format
 
@@ -40,7 +22,7 @@ Each subsequent run polls the default listing (newest-first), identifies new pos
 ```
 
 | Field | Description |
-|---|---|
+|-------|-------------|
 | `id` | Unique OLX listing ID |
 | `url` | Direct link to the listing |
 | `title` | Listing title |
@@ -89,7 +71,7 @@ POLL_INTERVAL=60000 ./target/release/olx-watch
 ## Files
 
 | File | Purpose |
-|---|---|
+|------|---------|
 | `src/main.rs` | Unified binary — two-phase collection |
 | `src/lib.rs` | Shared utilities (HTTP, parsing, helpers) |
 | `Cargo.toml` | Rust package manifest |

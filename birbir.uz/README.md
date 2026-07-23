@@ -2,45 +2,6 @@
 
 Rust monitor that polls [BirBir.uz](https://birbir.uz) for newly created listings via their JSON API.
 
-## Stack
-
-- **Rust** — compiled binary, ~3 MB RSS at runtime
-- **ureq** — lightweight HTTP client
-
-## How it works
-
-1. Obtains a session token from `birbir.uz` (Bearer token extracted from the session cookie)
-2. Paginates through all current listings via `POST /api/frontoffice/1.3.5.0/offer/feed`
-3. Detects new posts by tracking seen IDs in `~/.local/share/birbir/state.json`
-4. Appends each new post to `~/.local/share/birbir/birbir_export.jsonl`
-
-## Output format
-
-`~/.local/share/birbir/birbir_export.jsonl` — JSON Lines, one offer per line:
-
-```json
-{
-  "id": 272116974,
-  "url": "https://birbir.uz/uz/toshkent/cat/telefonlar/smartfonlar/o/iphon-14-pro-272116974",
-  "title": "Iphon 14 pro",
-  "price": 500000000,
-  "currency": "UZS",
-  "city": "Toshkent",
-  "published_at": 1784694169564,
-  "category_path": "telefonlar/smartfonlar"
-}
-```
-
-Fields:
-- **id** — unique offer ID
-- **url** — full permalink to the listing
-- **title** — listing title
-- **price** — numeric price value
-- **currency** — currency code (UZS or USD)
-- **city** — location from the listing
-- **published_at** — epoch timestamp (ms)
-- **category_path** — category hierarchy (e.g. "telefonlar/smartfonlar")
-
 ## Quick start
 
 ```bash
@@ -96,6 +57,33 @@ POLL_INTERVAL=60000 ./target/release/birbir-watch
 ```
 
 State saves automatically after each poll cycle.
+
+## Output format
+
+`~/.local/share/birbir/birbir_export.jsonl` — JSON Lines, one offer per line:
+
+```json
+{
+  "id": 272116974,
+  "url": "https://birbir.uz/uz/toshkent/cat/telefonlar/smartfonlar/o/iphon-14-pro-272116974",
+  "title": "Iphon 14 pro",
+  "price": 500000000,
+  "currency": "UZS",
+  "city": "Toshkent",
+  "published_at": 1784694169564,
+  "category_path": "telefonlar/smartfonlar"
+}
+```
+
+Fields:
+- **id** — unique offer ID
+- **url** — full permalink to the listing
+- **title** — listing title
+- **price** — numeric price value
+- **currency** — currency code (UZS or USD)
+- **city** — location from the listing
+- **published_at** — epoch timestamp (ms)
+- **category_path** — category hierarchy (e.g. "telefonlar/smartfonlar")
 
 ## Files
 

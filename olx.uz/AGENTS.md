@@ -1,42 +1,72 @@
-- Rust toolchain required; build with `cargo build --release`
-- Library `src/lib.rs` -- shared utilities (`fetch_json`, `extract_id`, `data_dir`, `ApiResponse`)
-- Single binary `olx-watch` in `src/main.rs` (deps: ureq, serde, serde_json)
+# OLX Watch
+## Purpose
+Maintain a complete OLX.uz listing archive:
 
-## Two-phase collection
+1. Initial full collection of all active listings.
+2. Incremental collection of newly created listings.
 
-### Phase 1 -- Initial full dump (one-time)
-- Runs automatically on first execution (no `state.json` found)
-- BFS category discovery: starts with the default listing, then paginates every discovered category
-- Bypasses the API's 1000-offset-per-query cap by scoping each pagination to a single `category_id`
-- Writes every post to `~/.local/share/olx/olx_export.jsonl`
-- Saves `state.json` with `max_id`, `initial_complete: true`, and `known_categories`
+## Build
+```bash
+cargo build --release
+```
 
-### Phase 2 -- Ongoing poll (every timer tick)
-- Polls the default listing (newest-first)
-- Processes posts with `id > max_id` as new; skips already-known posts
-- Stops paginating when a full page contains only known posts (caught up)
-- Appends new posts to the same `olx_export.jsonl` file -- nothing is ever deleted
+## Structure
+* `src/main.rs` — collection logic.
+* `src/lib.rs` — HTTP, parsing, models, helpers.
 
-### Daemon mode
-- Set `POLL_INTERVAL` (ms) to run as a continuous loop instead of a one-shot
-- Example: `POLL_INTERVAL=60000 ./olx-watch` polls every 60 seconds
+## Collection
+### Phase 1: Full Sync
+* Triggered when `initial_complete=false`.
+* Discover categories via BFS.
+* Paginate each category separately to bypass OLX's 1000-offset limit.
+* Export all unique listings.
+* Save:
 
-## Output format
-- File: `~/.local/share/olx/olx_export.jsonl` (JSON Lines, one object per line)
-- Fields kept: `id`, `url`, `title`, `business`, `created_time`, `last_refresh_time`, `price_uzs`, `category_type`, `location_city`, `location_district`, `location_region`, `coordinates`
+  * `max_id`
+  * `initial_complete=true`
+  * `known_categories`
 
-## State
-- File: `~/.local/share/olx/state.json`
-- Tracks: `max_id` (highest seen ID), `initial_complete` (whether Phase 1 is done), `known_categories` (list of discovered category IDs)
+### Phase 2: Incremental Sync
+* Poll newest-first listing feed.
+* Export listings with `id > max_id`.
+* Stop when an entire page contains only known listings.
+* Append only; never delete data.
 
-## Data dir
-- `~/.local/share/olx/`
+## Storage
+Directory: `~/.local/share/olx/`
 
-## Error logging
-- `[ERROR]` and `[WARN]` prefixed messages on stderr
+Files:
 
-## Systemd
-- Service: `~/.config/systemd/user/olx-watch.service` -- `Type=oneshot`, triggered by timer
-- Timer: `~/.config/systemd/user/olx-watch.timer` -- `OnCalendar=*:0/30` (every 30 min)
-- Manage: `systemctl --user {start,stop,restart,status} olx-watch.service` or `olx-watch.timer`
-- Logs: `journalctl --user -u olx-watch.service -f`
+* `state.json` → `{ max_id, initial_complete, known_categories }`
+* `olx_export.jsonl` → collected listings
+
+## Export Schema
+Listing:
+`id,url,title,business,created_time,last_refresh_time`
+
+Derived:
+`price_uzs,category_type`
+
+Location:
+`location_city,location_district,location_region,coordinates`
+
+## State Schema
+
+```json
+{
+  "version": 1,
+  "max_id": 123,
+  "initial_complete": true,
+  "known_categories": [1, 2, 3]
+}
+```
+
+Missing `version` field is treated as version 1.
+
+## Operational Invariants
+
+* Export file is append-only.
+* `max_id` must never decrease.
+* State writes are atomic (write to `.tmp`, then `rename`).
+* Only one instance may run at a time (enforced via `flock`).
+* Initial collection must complete before incremental polling begins.
