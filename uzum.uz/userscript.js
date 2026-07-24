@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Uzum Marketplace Collector
 // @namespace    https://uzum.uz/
-// @version      2.2.0
+// @version      2.3.0
 // @description  Collects Uzum (uzum.uz) marketplace product catalog into IndexedDB. Exports JSONL. One-shot collection, resume on restart.
 // @author       
 // @match        https://uzum.uz/*
@@ -22,6 +22,7 @@ const CFG = {
   BATCH_SIZE: 48,
   REQUEST_DELAY_MS: 400,
   SAVE_INTERVAL: 50,
+  OFFSET_LIMIT: 9936, // max safe offset (offset + BATCH < 10000)
   GRAPHQL_URL: 'https://graphql.uzum.uz/',
   REST_BASE: 'https://api.uzum.uz/api',
 };
@@ -167,7 +168,7 @@ class ProductDB {
   exportAll() {
     // JSONL export — one JSON object per line, no wrapper. Append-friendly.
     return this.getAllProducts().then(products => {
-      const header = JSON.stringify({ exportedAt: new Date().toISOString(), totalProducts: products.length, version: '2.2.0', source: 'uzum.uz' });
+      const header = JSON.stringify({ exportedAt: new Date().toISOString(), totalProducts: products.length, version: '2.3.0', source: 'uzum.uz' });
       const lines = products.map(p => JSON.stringify(p));
       return header + '\n' + lines.join('\n');
     });
@@ -215,8 +216,8 @@ class UzumApi {
 
   async getCategories() {
     try {
-      const data = await this.restGet('/main/root-categories?eco=false');
-      return Array.isArray(data) ? data : (data?.data || data?.payload || []);
+      const data = await this.restGet('/main/root-categories');
+      return data?.payload || [];
     } catch (e) {
       Log.warn('REST categories failed: ' + e.message);
       return [];
@@ -254,7 +255,13 @@ class UzumApi {
     try {
       const data = await graphql(query, vars, 'MakeSearch_ItemsAndFilters');
       return data?.makeSearch || null;
-    } catch (e) { Log.error('search error: ' + e.message); return null; }
+    } catch (e) {
+      if (e.message.includes('too big query offset')) {
+        Log.warn(`offset ${offset} exceeds limit — returning empty`);
+        return { items: [], total: null, _offsetLimit: true };
+      }
+      Log.error('search error: ' + e.message); return null;
+    }
   }
 }
 
@@ -297,6 +304,8 @@ class ProductCollector {
   async _collectByCat(cats) {
     let ri = 0, ro = 0;
     ri = await this.db.getState('resume_cat_idx', 0); ro = await this.db.getState('resume_offset', 0);
+    // If saved resume offset is past the limit, skip it
+    if (ro && ro >= CFG.OFFSET_LIMIT) { ri++; ro = 0; }
     for (let ci = 0; ci < cats.length; ci++) {
       if (this.aborted) return;
       if (ci < ri) continue;
@@ -305,8 +314,13 @@ class ProductCollector {
       let offset = (ci === ri) ? ro : 0;
       let empty = 0;
       while (!this.aborted) {
+        if (offset >= CFG.OFFSET_LIMIT) {
+          Log.warn(`Category ${cat.title} (${cat.id}) has more products beyond offset limit`);
+          break;
+        }
         const r = await this.api.searchProducts({ categoryId: cat.id, offset });
         if (!r) { empty++; if (empty >= 3) break; await delay(1000); continue; }
+        if (r._offsetLimit) break;
         empty = 0;
         const items = (r.items || []).map(i => i?.catalogCard).filter(Boolean);
         if (!items.length) break;
@@ -324,10 +338,18 @@ class ProductCollector {
   }
 
   async _collectBySearch() {
-    let offset = await this.db.getState('resume_offset', 0); let empty = 0;
+    let offset = await this.db.getState('resume_offset', 0);
+    // If saved resume offset is past the limit, reset
+    if (offset >= CFG.OFFSET_LIMIT) offset = 0;
+    let empty = 0;
     while (!this.aborted) {
+      if (offset >= CFG.OFFSET_LIMIT) {
+        Log.warn('Search: reached offset limit, stopping');
+        break;
+      }
       const r = await this.api.searchProducts({ offset });
       if (!r) { empty++; if (empty >= 3) break; await delay(2000); continue; }
+      if (r._offsetLimit) break;
       empty = 0;
       const items = (r.items || []).map(i => i?.catalogCard).filter(Boolean);
       if (!items.length) break;
@@ -393,7 +415,7 @@ function createUI(db, collector) {
     #uz-panel .log::-webkit-scrollbar-thumb{background:#444;border-radius:2px}
   `);
   const p = document.createElement('div'); p.id = 'uz-panel';
-  p.innerHTML = `<h3>📦 <span>Uzum</span> Collector</h3><div class="r"><span class="l">Status</span><span class="v" id="uz-s">Idle</span></div><div class="r"><span class="l">Collected</span><span class="v" id="uz-c">0</span></div><div class="r"><button class="bs" id="uz-go">▶ Start</button><button class="bp" id="uz-st" disabled>■ Stop</button></div><div class="br"><button class="be" id="uz-ex">Export JSON</button></div><div class="log" id="uz-log"></div>`;
+  p.innerHTML = `<h3>📦 <span>Uzum</span> Collector v2.3</h3><div class="r"><span class="l">Status</span><span class="v" id="uz-s">Idle</span></div><div class="r"><span class="l">Collected</span><span class="v" id="uz-c">0</span></div><div class="r"><button class="bs" id="uz-go">▶ Start</button><button class="bp" id="uz-st" disabled>■ Stop</button></div><div class="br"><button class="be" id="uz-ex">Export JSON</button></div><div class="log" id="uz-log"></div>`;
   document.body.appendChild(p);
   const s = p.querySelector('#uz-s'), c = p.querySelector('#uz-c'), go = p.querySelector('#uz-go'), st = p.querySelector('#uz-st'), ex = p.querySelector('#uz-ex'), lg = p.querySelector('#uz-log');
   Log.init(lg);
@@ -432,7 +454,7 @@ function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
    =================================================================== */
 (async function () {
   'use strict';
-  Log.info('Uzum Collector v2.2 initializing...');
+  Log.info('Uzum Collector v2.3 initializing...');
   const db = new ProductDB();
   try { await db.open(); Log.info('IndexedDB ready'); } catch (e) { Log.error('DB: ' + e.message); return; }
   const api = new UzumApi();
