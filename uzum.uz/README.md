@@ -1,12 +1,14 @@
 # Uzum.uz Market Data Collector
 
-Collects all product listings from [Uzum.uz](https://uzum.uz) into a machine-readable archive — fully history, ongoing updates, no deletions.
+Collects all product listings from [Uzum.uz](https://uzum.uz) into a machine-readable archive — full history, ongoing updates, no deletions. Designed for 24x7 unattended operation with crash safety and health monitoring.
 
 ## Stack
 
 - **Rust** — single compiled binary, ~3 MB RSS at runtime
 - **ureq** — lightweight HTTP client
 - **serde** / **serde_json** — JSON serialization
+- **fs2** — file locking (single-instance enforcement)
+- **signal-hook** — graceful shutdown (SIGTERM/SIGINT)
 - **GraphQL** — product listings via `https://graphql.uzum.uz/`
 - **REST** — category tree via `https://api.uzum.uz/api`
 
@@ -92,14 +94,28 @@ POLL_INTERVAL=60000 ./target/release/uzum-watch
 ### Run via systemd (recommended)
 
 ```bash
+# Copy service files
+cp systemd/uzum-watch.service ~/.config/systemd/user/
+cp systemd/uzum-watch.timer ~/.config/systemd/user/
+
+# Create environment file
+mkdir -p /etc/uzum-watch
+cp systemd/env.example /etc/uzum-watch/env
+# Edit /etc/uzum-watch/env with your token
+
 # Start and enable the timer
+systemctl --user daemon-reload
 systemctl --user enable --now uzum-watch.timer
 
 # Check status
 systemctl --user status uzum-watch.timer
+systemctl --user status uzum-watch.service
 
-# View latest poll results
+# View logs
 journalctl --user -u uzum-watch.service -f
+
+# Check health
+cat ~/.local/share/uzum/health.json
 ```
 
 ### Run ad-hoc (one poll cycle)
@@ -112,11 +128,15 @@ journalctl --user -u uzum-watch.service -f
 
 | File | Purpose |
 |---|---|
-| `src/main.rs` | Unified binary — two-phase collection |
-| `src/lib.rs` | Shared utilities (HTTP, GraphQL, parsing) |
+| `src/main.rs` | Unified binary — two-phase collection with resilience |
+| `src/lib.rs` | Shared utilities (HTTP, GraphQL, parsing, lock, health, logging) |
 | `Cargo.toml` | Rust package manifest |
+| `systemd/` | Systemd service/timer for 24x7 operation |
 | `~/.local/share/uzum/uzum_export.jsonl` | Output — all collected products (JSON Lines) |
 | `~/.local/share/uzum/state.json` | State — max_id, initial_complete, known_categories |
+| `~/.local/share/uzum/uzum.lock` | Lock file — prevents concurrent instances |
+| `~/.local/share/uzum/health.json` | Health status — last poll timestamp, product count |
+| `~/.local/share/uzum/uzum.log` | Log file — rotated at 10 MB |
 
 ## Configuration
 
@@ -124,11 +144,30 @@ Via environment variables:
 
 - `UZUM_TOKEN` — JWT bearer token (required)
 - `POLL_INTERVAL` — polling interval in ms for daemon mode (default: unset = oneshot mode)
+- `MAX_LOG_SIZE` — max log file size before rotation in bytes (default: 10 MB)
 
-## Error logging
+## 24x7 Resilience
 
-Errors are printed to stderr with `[ERROR]` and `[WARN]` prefixes:
+The system includes several features for unattended operation:
+
+- **Single-instance lock** — flock-based lock file prevents concurrent scrapers
+- **Graceful shutdown** — handles SIGTERM/SIGINT for clean systemd stops
+- **Atomic state writes** — state.json uses write-to-tmp + rename for crash safety
+- **Health reporting** — `health.json` written after each poll with timestamp, status, product count
+- **Log rotation** — automatic rotation when log exceeds 10 MB
+- **Token expiry detection** — logs warning on 401/403 responses
+
+## Logging
+
+Logs are written to both stderr and `~/.local/share/uzum/uzum.log`:
+
+- **Rotation** — automatic when log exceeds 10 MB
+- **Timestamped** — rotated logs named `uzum-{timestamp}.log`
+- **Structured** — `[INFO]`, `[WARN]`, `[ERROR]` prefixes
+
+Errors include:
 - HTTP failures (network, timeouts)
 - JSON parse errors
 - Missing fields
 - Rate limiting (429) with automatic retry and exponential backoff
+- Token expiry (401/403) with re-authentication reminder
