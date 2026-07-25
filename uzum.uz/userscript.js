@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Uzum Marketplace Collector
 // @namespace    https://uzum.uz/
-// @version      2.3.0
+// @version      2.4.0
 // @description  Collects Uzum (uzum.uz) marketplace product catalog into IndexedDB. Exports JSONL. One-shot collection, resume on restart.
 // @author       
 // @match        https://uzum.uz/*
@@ -168,7 +168,7 @@ class ProductDB {
   exportAll() {
     // JSONL export — one JSON object per line, no wrapper. Append-friendly.
     return this.getAllProducts().then(products => {
-      const header = JSON.stringify({ exportedAt: new Date().toISOString(), totalProducts: products.length, version: '2.3.0', source: 'uzum.uz' });
+      const header = JSON.stringify({ exportedAt: new Date().toISOString(), totalProducts: products.length, version: '2.4.0', source: 'uzum.uz' });
       const lines = products.map(p => JSON.stringify(p));
       return header + '\n' + lines.join('\n');
     });
@@ -183,7 +183,7 @@ class ProductDB {
       rating: p.rating, reviewCount: p.reviewCount,
       category: p.category, categoryId: p.categoryId,
       firstSeen: p.firstSeen, lastSeen: p.lastSeen,
-      priceHistory: p.priceHistory || [],
+      // priceHistory removed in v2.4.0
     };
   }
   slimAll() {
@@ -365,16 +365,13 @@ class ProductCollector {
     const batch = cards.map(card => {
       const old = existing.get(String(card.productId));
       if (old) {
-        const ch = old.price !== card.minSellPrice;
-        const h = old.priceHistory || [];
-        if (ch && old.price != null && old.price !== 0) h.push({ timestamp: now, price: old.price });
         return {
           id: card.productId, title: card.title || old.title,
           price: card.minSellPrice, oldPrice: card.minFullPrice,
           discountPercent: card.minFullPrice && card.minSellPrice ? Math.round((1 - card.minSellPrice / card.minFullPrice) * 100) : 0,
           rating: card.rating || old.rating, reviewCount: card.feedbackQuantity || old.reviewCount,
           category: old.category || cn, categoryId: old.categoryId || cid,
-          lastSeen: now, priceHistory: h,
+          firstSeen: old.firstSeen, lastSeen: now,
         };
       }
       return {
@@ -383,7 +380,7 @@ class ProductCollector {
         discountPercent: card.minFullPrice && card.minSellPrice ? Math.round((1 - card.minSellPrice / card.minFullPrice) * 100) : 0,
         rating: card.rating || null, reviewCount: card.feedbackQuantity || 0,
         category: cn, categoryId: cid,
-        firstSeen: now, lastSeen: now, priceHistory: [],
+        firstSeen: now, lastSeen: now,
       };
     });
     await this.db.putProducts(batch);
@@ -415,7 +412,7 @@ function createUI(db, collector) {
     #uz-panel .log::-webkit-scrollbar-thumb{background:#444;border-radius:2px}
   `);
   const p = document.createElement('div'); p.id = 'uz-panel';
-  p.innerHTML = `<h3>📦 <span>Uzum</span> Collector v2.3</h3><div class="r"><span class="l">Status</span><span class="v" id="uz-s">Idle</span></div><div class="r"><span class="l">Collected</span><span class="v" id="uz-c">0</span></div><div class="r"><button class="bs" id="uz-go">▶ Start</button><button class="bp" id="uz-st" disabled>■ Stop</button></div><div class="br"><button class="be" id="uz-ex">Export JSON</button></div><div class="log" id="uz-log"></div>`;
+  p.innerHTML = `<h3>📦 <span>Uzum</span> Collector v2.4</h3><div class="r"><span class="l">Status</span><span class="v" id="uz-s">Idle</span></div><div class="r"><span class="l">Collected</span><span class="v" id="uz-c">0</span></div><div class="r"><button class="bs" id="uz-go">▶ Start</button><button class="bp" id="uz-st" disabled>■ Stop</button></div><div class="br"><button class="be" id="uz-ex">Export JSON</button></div><div class="log" id="uz-log"></div>`;
   document.body.appendChild(p);
   const s = p.querySelector('#uz-s'), c = p.querySelector('#uz-c'), go = p.querySelector('#uz-go'), st = p.querySelector('#uz-st'), ex = p.querySelector('#uz-ex'), lg = p.querySelector('#uz-log');
   Log.init(lg);
@@ -454,7 +451,7 @@ function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
    =================================================================== */
 (async function () {
   'use strict';
-  Log.info('Uzum Collector v2.3 initializing...');
+  Log.info('Uzum Collector v2.4 initializing...');
   const db = new ProductDB();
   try { await db.open(); Log.info('IndexedDB ready'); } catch (e) { Log.error('DB: ' + e.message); return; }
   const api = new UzumApi();
