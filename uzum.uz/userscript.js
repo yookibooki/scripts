@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Uzum Marketplace Collector
 // @namespace    https://uzum.uz/
-// @version      2.6.0
+// @version      2.7.0
 // @description  Collects Uzum (uzum.uz) marketplace product catalog into IndexedDB. Exports JSONL. One-shot collection, resume on restart.
 // @author       
 // @match        https://uzum.uz/*
@@ -329,10 +329,9 @@ class ProductCollector {
 
   stop() { this.aborted = true; this.running = false; this._s('Stopping...'); }
 
-  // Bootstrap cat_totals from DB counts + API totals (one-time after upgrade)
+  // Bootstrap cat_totals from DB counts + API totals — parallel at 20 concurrency
   async _bootstrapCatTotals(cats) {
     Log.info('Building category index from DB...');
-    // Count existing products per category directly from IndexedDB
     const allProds = await this.db.getAllProducts();
     const catCounts = {};
     for (const p of allProds) {
@@ -340,15 +339,12 @@ class ProductCollector {
       if (cid) catCounts[cid] = (catCounts[cid] || 0) + 1;
     }
     const totals = {};
-    for (let ci = 0; ci < cats.length; ci++) {
-      if (this.aborted) return totals;
-      const cat = cats[ci];
-      if (!cat.id) continue;
-      if (ci > 0 && ci % 50 === 0) {
-        Log.info(`Category index: ${ci}/${cats.length} (${Math.round(ci/cats.length*100)}%)`);
-      }
+    let done = 0;
+    const filtered = cats.filter(c => c.id);
+
+    await pMap(filtered, async (cat) => {
+      if (this.aborted) return;
       let r = await this.api.searchProducts({ categoryId: cat.id, offset: 0, limit: 1 });
-      // Retry once on failure (transient timeouts)
       if (!r || !r.total) {
         await delay(2000);
         r = await this.api.searchProducts({ categoryId: cat.id, offset: 0, limit: 1 });
@@ -357,38 +353,46 @@ class ProductCollector {
         const have = catCounts[cat.id] || 0;
         totals[cat.id] = { total: r.total, offset: Math.min(have, r.total) };
       }
-      // Throttle to avoid hammering the server
-      await delay(CFG.REQUEST_DELAY_MS);
-    }
+      done++;
+      if (done % 250 === 0) {
+        Log.info(`Category index: ${done}/${filtered.length} (${Math.round(done / filtered.length * 100)}%)`);
+      }
+    }, 20);
+
+    if (this.aborted) return totals;
     await this.db.setState('cat_totals', totals);
     Log.info(`Category index built (${Object.keys(totals).length} cats)`);
     return totals;
   }
 
-  // Smart refresh: quick page-0 pass, then scan only categories that grew
+  // Smart refresh: check all categories in parallel, scan only the ones that grew
   async _refreshByCat(cats, stored) {
     const totals = { ...stored };
     const changed = [];
+    const filtered = cats.filter(c => c.id);
 
     Log.info('Checking category totals...');
-    for (let ci = 0; ci < cats.length && !this.aborted; ci++) {
-      const cat = cats[ci];
-      if (!cat.id) continue;
-      if (ci > 0 && ci % 50 === 0) {
-        Log.info(`Checking category ${ci}/${cats.length} (${Math.round(ci/cats.length*100)}%)`);
-      }
+
+    const results = await pMap(filtered, async (cat) => {
+      if (this.aborted) return null;
       let r = await this.api.searchProducts({ categoryId: cat.id, offset: 0, limit: CFG.BATCH_SIZE });
-      // Retry once on transient timeout
       if (!r) {
         await delay(2000);
         r = await this.api.searchProducts({ categoryId: cat.id, offset: 0, limit: CFG.BATCH_SIZE });
       }
-      if (!r) continue;
+      if (!r) return null;
+      return { cat, r };
+    }, 20);
+
+    if (this.aborted) { await this.db.setState('cat_totals', totals); return 0; }
+
+    for (const result of results) {
+      if (!result) continue;
+      const { cat, r } = result;
       const curTotal = r.total || 0;
       const prev = stored[cat.id];
       const needDeep = !prev || curTotal > prev.total || (prev.offset < Math.min(prev.total, CFG.OFFSET_LIMIT));
       if (needDeep) {
-        // upsert page 0 immediately — catches hot new products
         const items = (r.items || []).map(i => i?.catalogCard).filter(Boolean);
         if (items.length) {
           await this._upsert(items, cat);
@@ -397,7 +401,6 @@ class ProductCollector {
         changed.push(cat);
         totals[cat.id] = { total: curTotal, offset: prev ? prev.offset : 0 };
       } else {
-        // category unchanged — still record its total in case totals object is fresh
         totals[cat.id] = prev;
       }
     }
@@ -446,23 +449,22 @@ class ProductCollector {
   }
 
   async _collectByCat(cats) {
-    let ri = 0, ro = 0;
-    ri = await this.db.getState('resume_cat_idx', 0); ro = await this.db.getState('resume_offset', 0);
-    if (ro && ro >= CFG.OFFSET_LIMIT) { ri++; ro = 0; }
-    const totals = {};
-    for (let ci = 0; ci < cats.length; ci++) {
-      if (this.aborted) return;
-      if (ci < ri) continue;
-      const cat = cats[ci];
-      if (!cat.id) continue;
-      let offset = (ci === ri) ? ro : 0;
+    const filtered = cats.filter(c => c.id);
+    const totals = await this.db.getState('cat_totals', {});
+
+    Log.info(`Collecting ${filtered.length} categories...`);
+
+    const perCat = await pMap(filtered, async (cat) => {
+      if (this.aborted) return 0;
+      const prev = totals[cat.id];
+      if (prev && prev.offset >= Math.min(prev.total, CFG.OFFSET_LIMIT)) return 0;
+
+      let offset = prev ? prev.offset : 0;
       let empty = 0;
-      let firstTotal = null;
+      let firstTotal = prev ? prev.total : null;
+
       while (!this.aborted) {
-        if (offset >= CFG.OFFSET_LIMIT) {
-          Log.warn(`Category ${cat.title} (${cat.id}) has more products beyond offset limit`);
-          break;
-        }
+        if (offset >= CFG.OFFSET_LIMIT) break;
         const r = await this.api.searchProducts({ categoryId: cat.id, offset });
         if (!r) { empty++; if (empty >= 3) break; await delay(1000); continue; }
         if (r._offsetLimit) break;
@@ -471,19 +473,26 @@ class ProductCollector {
         if (!items.length) break;
         if (firstTotal === null && r.total != null) firstTotal = r.total;
         await this._upsert(items, cat);
-        this.collectedCount += items.length; this._c(this.collectedCount);
         offset += CFG.BATCH_SIZE;
-        if (this.collectedCount % CFG.SAVE_INTERVAL === 0) {
-          await this.db.setState('resume_cat_idx', ci); await this.db.setState('resume_offset', offset); await this.db.setState('collected_count', this.collectedCount);
-        }
-        if (this.aborted) return;
+        if (this.aborted) return 0;
         await delay(CFG.REQUEST_DELAY_MS);
       }
-      if (firstTotal) totals[cat.id] = { total: firstTotal, offset: Math.min(offset, firstTotal) };
-      // Save totals incrementally so partial runs still help
-      await this.db.setState('cat_totals', totals);
+
+      const catCollected = offset - (prev ? prev.offset : 0);
+      if (firstTotal) {
+        totals[cat.id] = { total: firstTotal, offset: Math.min(offset, firstTotal) };
+        await this.db.setState('cat_totals', totals);
+      }
+      return catCollected;
+    }, 20);
+
+    if (!this.aborted) {
+      this.collectedCount += perCat.reduce((s, v) => s + v, 0);
+      this._c(this.collectedCount);
+      await this.db.deleteState('resume_cat_idx');
+      await this.db.deleteState('resume_offset');
+      await this.db.setState('collected_count', this.collectedCount);
     }
-    await this.db.deleteState('resume_cat_idx'); await this.db.deleteState('resume_offset'); await this.db.setState('collected_count', this.collectedCount);
   }
 
   async _collectBySearch() {
@@ -604,6 +613,20 @@ function createUI(db, collector) {
 }
 
 function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// Concurrency-limited parallel map — runs fn on each item with at most N inflight
+async function pMap(items, fn, concurrency = 20) {
+  const results = new Array(items.length);
+  let idx = 0;
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (idx < items.length) {
+      const i = idx++;
+      results[i] = await fn(items[i], i);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
 
 /* ===================================================================
    INIT
