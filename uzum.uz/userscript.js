@@ -344,14 +344,24 @@ class ProductCollector {
       if (this.aborted) return totals;
       const cat = cats[ci];
       if (!cat.id) continue;
-      const r = await this.api.searchProducts({ categoryId: cat.id, offset: 0, limit: 1 });
+      if (ci > 0 && ci % 50 === 0) {
+        Log.info(`Category index: ${ci}/${cats.length} (${Math.round(ci/cats.length*100)}%)`);
+      }
+      let r = await this.api.searchProducts({ categoryId: cat.id, offset: 0, limit: 1 });
+      // Retry once on failure (transient timeouts)
+      if (!r || !r.total) {
+        await delay(2000);
+        r = await this.api.searchProducts({ categoryId: cat.id, offset: 0, limit: 1 });
+      }
       if (r && r.total) {
         const have = catCounts[cat.id] || 0;
         totals[cat.id] = { total: r.total, offset: Math.min(have, r.total) };
       }
+      // Throttle to avoid hammering the server
+      await delay(CFG.REQUEST_DELAY_MS);
     }
     await this.db.setState('cat_totals', totals);
-    Log.info(`Category index built (${Object.keys(totals).length} cats, offset≈DB count)`);
+    Log.info(`Category index built (${Object.keys(totals).length} cats)`);
     return totals;
   }
 
@@ -364,7 +374,15 @@ class ProductCollector {
     for (let ci = 0; ci < cats.length && !this.aborted; ci++) {
       const cat = cats[ci];
       if (!cat.id) continue;
-      const r = await this.api.searchProducts({ categoryId: cat.id, offset: 0, limit: CFG.BATCH_SIZE });
+      if (ci > 0 && ci % 50 === 0) {
+        Log.info(`Checking category ${ci}/${cats.length} (${Math.round(ci/cats.length*100)}%)`);
+      }
+      let r = await this.api.searchProducts({ categoryId: cat.id, offset: 0, limit: CFG.BATCH_SIZE });
+      // Retry once on transient timeout
+      if (!r) {
+        await delay(2000);
+        r = await this.api.searchProducts({ categoryId: cat.id, offset: 0, limit: CFG.BATCH_SIZE });
+      }
       if (!r) continue;
       const curTotal = r.total || 0;
       const prev = stored[cat.id];
