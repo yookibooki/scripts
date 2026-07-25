@@ -175,7 +175,7 @@ class ProductDB {
   }
   // Strip old fat fields from legacy records (description, url, images, brand, seller, etc.)
   _slimProduct(p) {
-    if (!p.url && !p.images) return p; // already slim
+    if (!p.url && !p.images && !('priceHistory' in p)) return p; // already slim
     return {
       id: p.id, title: p.title,
       price: p.price, oldPrice: p.oldPrice,
@@ -279,6 +279,12 @@ class ProductCollector {
   _c(v) { if (this._ce) this._ce.textContent = String(v); }
 
   async start() {
+    const done = await this.db.getState('status');
+    if (done === 'collection_done') {
+      Log.info('Collection already done. Use Export JSON to re-export.');
+      this._s('Done ✓'); this._c(await this.db.getProductCount());
+      this.running = false; return true;
+    }
     this.running = true; this.aborted = false;
     Log.info('Starting collection...'); this._s('Collecting...');
     try {
