@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Uzum Marketplace Collector
 // @namespace    https://uzum.uz/
-// @version      2.7.0
+// @version      2.8.0
 // @description  Collects Uzum (uzum.uz) marketplace product catalog into IndexedDB. Exports JSONL. One-shot collection, resume on restart.
-// @author       
+// @author
 // @match        https://uzum.uz/*
 // @match        https://www.uzum.uz/*
 // @grant        GM_registerMenuCommand
@@ -21,11 +21,15 @@ const CFG = {
   STATE_STORE: 'state',
   BATCH_SIZE: 48,
   REQUEST_DELAY_MS: 400,
-  SAVE_INTERVAL: 50,
-  OFFSET_LIMIT: 9936, // max safe offset (offset + BATCH < 10000)
+  REQUEST_TIMEOUT_MS: 30000,
+  SAVE_EVERY_N_CATS: 50,
+  OFFSET_LIMIT: 9936,
   GRAPHQL_URL: 'https://graphql.uzum.uz/',
   REST_BASE: 'https://api.uzum.uz/api',
+  CONCURRENCY: 20,
 };
+
+const VERSION = '2.8.0';
 
 /* ===================================================================
    LOGGER
@@ -52,7 +56,7 @@ const Log = {
    =================================================================== */
 async function apiFetch(url, opts = {}) {
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), opts.timeout || 20000);
+  const timer = setTimeout(() => ctrl.abort(), opts.timeout || CFG.REQUEST_TIMEOUT_MS);
   try {
     const res = await fetch(url, {
       method: opts.method || 'GET',
@@ -150,6 +154,26 @@ class ProductDB {
   getProductCount() {
     return new Promise(resolve => { const req = this._tx(CFG.PRODUCTS_STORE).count(); req.onsuccess = () => resolve(req.result); req.onerror = () => resolve(0); });
   }
+  // Cursor-based category count — avoids loading full product objects
+  getCategoryCounts() {
+    return new Promise(resolve => {
+      const store = this._tx(CFG.PRODUCTS_STORE);
+      const idx = store.index('categoryId');
+      const counts = {};
+      const req = idx.openCursor();
+      req.onsuccess = e => {
+        const cursor = e.target.result;
+        if (cursor) {
+          const cid = cursor.key;
+          if (cid) counts[cid] = (counts[cid] || 0) + 1;
+          cursor.continue();
+        } else {
+          resolve(counts);
+        }
+      };
+      req.onerror = () => resolve({});
+    });
+  }
   setState(key, value) { return new Promise(resolve => { const req = this._tx(CFG.STATE_STORE, 'readwrite').put({ key, value }); req.onsuccess = () => resolve(); }); }
   getState(key, def = null) { return new Promise(resolve => { const req = this._tx(CFG.STATE_STORE).get(key); req.onsuccess = () => resolve(req.result ? req.result.value : def); req.onerror = () => resolve(def); }); }
   deleteState(key) { return new Promise(resolve => { const req = this._tx(CFG.STATE_STORE, 'readwrite').delete(key); req.onsuccess = () => resolve(); }); }
@@ -166,16 +190,14 @@ class ProductDB {
     });
   }
   exportAll() {
-    // JSONL export — one JSON object per line, no wrapper. Append-friendly.
     return this.getAllProducts().then(products => {
-      const header = JSON.stringify({ exportedAt: new Date().toISOString(), totalProducts: products.length, version: '2.6.0', source: 'uzum.uz' });
+      const header = JSON.stringify({ exportedAt: new Date().toISOString(), totalProducts: products.length, version: VERSION, source: 'uzum.uz' });
       const lines = products.map(p => JSON.stringify(p));
       return header + '\n' + lines.join('\n');
     });
   }
-  // Strip old fat fields from legacy records (description, url, images, brand, seller, etc.)
   _slimProduct(p) {
-    if (!p.url && !p.images && !('priceHistory' in p)) return p; // already slim
+    if (!p.url && !p.images && !('priceHistory' in p)) return p;
     return {
       id: p.id, title: p.title,
       price: p.price, oldPrice: p.oldPrice,
@@ -183,7 +205,6 @@ class ProductDB {
       rating: p.rating, reviewCount: p.reviewCount,
       category: p.category, categoryId: p.categoryId,
       firstSeen: p.firstSeen, lastSeen: p.lastSeen,
-      // priceHistory removed in v2.4.0
     };
   }
   slimAll() {
@@ -257,10 +278,9 @@ class UzumApi {
       return data?.makeSearch || null;
     } catch (e) {
       if (e.message.includes('too big query offset')) {
-        Log.warn(`offset ${offset} exceeds limit — returning empty`);
         return { items: [], total: null, _offsetLimit: true };
       }
-      Log.error('search error: ' + e.message); return null;
+      throw e;
     }
   }
 }
@@ -273,91 +293,112 @@ class ProductCollector {
     this.db = db; this.api = api;
     this.running = false; this.aborted = false; this.collectedCount = 0;
     this._se = null; this._ce = null;
+    this._lock = false; // double-fire guard
   }
   setUI(s, c) { this._se = s; this._ce = c; }
   _s(v) { if (this._se) this._se.textContent = v; }
   _c(v) { if (this._ce) this._ce.textContent = String(v); }
 
   async start() {
-    const done = await this.db.getState('status');
-    if (done === 'collection_done') {
-      Log.info('Collection already done. Use Export JSON to re-export.');
-      this._s('Done ✓'); this._c(await this.db.getProductCount());
-      this.running = false; return true;
-    }
-    this.running = true; this.aborted = false;
-    Log.info('Starting collection...'); this._s('Collecting...');
+    if (this._lock) return false;
+    this._lock = true;
     try {
+      const done = await this.db.getState('status');
+      if (done === 'collection_done') {
+        Log.info('Collection already done. Use Export JSON to re-export.');
+        this._s('Done ✓'); this._c(await this.db.getProductCount());
+        return true;
+      }
+      this.running = true; this.aborted = false;
+      Log.info('Starting collection...'); this._s('Collecting...');
+
       const cats = await this._getLeaves();
-      if (cats.length) await this._collectByCat(cats);
-      else { Log.warn('No cats, trying search'); await this._collectBySearch(); }
-      if (this.aborted) { this._s('Stopped'); this.running = false; return false; }
+      if (!cats.length) {
+        Log.error('Failed to load categories. Cannot proceed.');
+        this._s('Error: no categories');
+        this.running = false;
+        return false;
+      }
+      await this._collectByCat(cats);
+
+      if (this.aborted) { this._s('Stopped (partial)'); this.running = false; return false; }
       const cnt = await this.db.getProductCount();
       Log.info(`Done. ${cnt} products`); this._s('Complete ✓'); this._c(cnt);
       await this.db.setState('status', 'collection_done');
       this.running = false; return true;
-    } catch (e) { Log.error('Failed: ' + e.message); this._s('Error'); this.running = false; return false; }
+    } catch (e) {
+      Log.error('Failed: ' + e.message); this._s('Error'); this.running = false; return false;
+    } finally {
+      this._lock = false;
+    }
   }
 
   async refresh() {
+    if (this._lock) return;
+    this._lock = true;
     Log.info('Refresh: scanning for new products...'); this._s('Refreshing...');
     const oldCount = await this.db.getProductCount();
     try {
       await this.db.deleteState('status');
       this.running = true; this.aborted = false;
       const cats = await this._getLeaves();
-      // Ensure we have category totals to work with
+      if (!cats.length) {
+        Log.error('Failed to load categories. Cannot refresh.');
+        this._s('Error: no categories');
+        this.running = false;
+        return;
+      }
       let stored = await this.db.getState('cat_totals', null);
       if (!stored) {
         Log.info('Building category index first...');
         stored = await this._bootstrapCatTotals(cats);
       }
-      if (this.aborted) { this._s('Stopped'); await this.db.setState('status', 'collection_done'); this.running = false; return; }
+      if (this.aborted) { this._s('Stopped (partial)'); await this.db.setState('status', 'collection_done'); this.running = false; return; }
       const scannedCats = await this._refreshByCat(cats, stored);
       this.running = false;
       const newCount = await this.db.getProductCount();
       const added = newCount - oldCount;
-      Log.info(`Refresh done. ${added} new, ${newCount} total (${scannedCats} categories changed).`);
+      Log.info(`Refresh done. +${added} new, ${newCount} total (${scannedCats} cats changed).`);
       await this.db.setState('status', 'collection_done');
       this._s('Done ✓'); this._c(newCount);
     } catch (e) {
       Log.error('Refresh failed: ' + e.message);
       await this.db.setState('status', 'collection_done');
       this._s('Error'); this.running = false;
+    } finally {
+      this._lock = false;
     }
   }
 
   stop() { this.aborted = true; this.running = false; this._s('Stopping...'); }
 
-  // Bootstrap cat_totals from DB counts + API totals — parallel at 20 concurrency
   async _bootstrapCatTotals(cats) {
     Log.info('Building category index from DB...');
-    const allProds = await this.db.getAllProducts();
-    const catCounts = {};
-    for (const p of allProds) {
-      const cid = p.categoryId;
-      if (cid) catCounts[cid] = (catCounts[cid] || 0) + 1;
-    }
+    const catCounts = await this.db.getCategoryCounts();
     const totals = {};
     let done = 0;
     const filtered = cats.filter(c => c.id);
 
     await pMap(filtered, async (cat) => {
       if (this.aborted) return;
-      let r = await this.api.searchProducts({ categoryId: cat.id, offset: 0, limit: 1 });
-      if (!r || !r.total) {
-        await delay(2000);
+      let r = null;
+      try {
         r = await this.api.searchProducts({ categoryId: cat.id, offset: 0, limit: 1 });
+      } catch (e) {
+        await delay(2000);
+        try { r = await this.api.searchProducts({ categoryId: cat.id, offset: 0, limit: 1 }); } catch (e2) { /* skip */ }
       }
       if (r && r.total) {
         const have = catCounts[cat.id] || 0;
         totals[cat.id] = { total: r.total, offset: Math.min(have, r.total) };
+      } else {
+        Log.warn(`Category ${cat.title} (${cat.id}): no total returned`);
       }
       done++;
       if (done % 250 === 0) {
         Log.info(`Category index: ${done}/${filtered.length} (${Math.round(done / filtered.length * 100)}%)`);
       }
-    }, 20);
+    }, CFG.CONCURRENCY);
 
     if (this.aborted) return totals;
     await this.db.setState('cat_totals', totals);
@@ -365,7 +406,6 @@ class ProductCollector {
     return totals;
   }
 
-  // Smart refresh: check all categories in parallel, scan only the ones that grew
   async _refreshByCat(cats, stored) {
     const totals = { ...stored };
     const changed = [];
@@ -375,14 +415,16 @@ class ProductCollector {
 
     const results = await pMap(filtered, async (cat) => {
       if (this.aborted) return null;
-      let r = await this.api.searchProducts({ categoryId: cat.id, offset: 0, limit: CFG.BATCH_SIZE });
-      if (!r) {
-        await delay(2000);
+      let r = null;
+      try {
         r = await this.api.searchProducts({ categoryId: cat.id, offset: 0, limit: CFG.BATCH_SIZE });
+      } catch (e) {
+        await delay(2000);
+        try { r = await this.api.searchProducts({ categoryId: cat.id, offset: 0, limit: CFG.BATCH_SIZE }); } catch (e2) { /* skip */ }
       }
       if (!r) return null;
       return { cat, r };
-    }, 20);
+    }, CFG.CONCURRENCY);
 
     if (this.aborted) { await this.db.setState('cat_totals', totals); return 0; }
 
@@ -407,39 +449,49 @@ class ProductCollector {
     if (this.aborted) { await this.db.setState('cat_totals', totals); return 0; }
 
     Log.info(`${changed.length} categories changed, scanning new pages...`);
-    for (const cat of changed) {
-      if (this.aborted) break;
+
+    // Parallel deep scan of changed categories
+    let scanned = 0;
+    await pMap(changed, async (cat) => {
+      if (this.aborted) return;
       const cur = totals[cat.id];
       await this._scanCategoryForward(cat, cur.offset, cur.total, totals);
-    }
+      scanned++;
+      if (scanned % CFG.SAVE_EVERY_N_CATS === 0) {
+        await this.db.setState('cat_totals', totals);
+        Log.info(`Deep scan: ${scanned}/${changed.length} categories`);
+      }
+    }, CFG.CONCURRENCY);
 
     await this.db.setState('cat_totals', totals);
     return changed.length;
   }
 
-  // Scan a single category from offset to limit-or-total, update the totals map in-place
   async _scanCategoryForward(cat, startOffset, apiTotal, totalsMap) {
     const limit = Math.min(apiTotal, CFG.OFFSET_LIMIT);
     let offset = startOffset;
     let empty = 0;
     while (!this.aborted && offset < limit) {
-      const r = await this.api.searchProducts({ categoryId: cat.id, offset });
-      if (!r) { empty++; if (empty >= 3) break; await delay(1000); continue; }
-      if (r._offsetLimit) break;
+      let r = null;
+      try {
+        r = await this.api.searchProducts({ categoryId: cat.id, offset });
+      } catch (e) {
+        empty++;
+        if (empty >= 3) { Log.warn(`Category ${cat.title} (${cat.id}): 3 failures at offset ${offset}`); break; }
+        await delay(1000);
+        continue;
+      }
+      if (!r || r._offsetLimit) break;
       empty = 0;
       const items = (r.items || []).map(i => i?.catalogCard).filter(Boolean);
       if (!items.length) break;
       await this._upsert(items, cat);
       this.collectedCount += items.length; this._c(this.collectedCount);
       offset += CFG.BATCH_SIZE;
-      if (this.collectedCount % CFG.SAVE_INTERVAL === 0) {
-        totalsMap[cat.id].offset = offset;
-        await this.db.setState('cat_totals', totalsMap);
-      }
       if (this.aborted) return;
       await delay(CFG.REQUEST_DELAY_MS);
     }
-    totalsMap[cat.id].offset = Math.min(offset, limit);
+    totalsMap[cat.id] = { total: apiTotal, offset: Math.min(offset, limit) };
   }
 
   async _getLeaves() {
@@ -453,68 +505,27 @@ class ProductCollector {
     const totals = await this.db.getState('cat_totals', {});
 
     Log.info(`Collecting ${filtered.length} categories...`);
+    let completed = 0;
 
-    const perCat = await pMap(filtered, async (cat) => {
-      if (this.aborted) return 0;
+    await pMap(filtered, async (cat) => {
+      if (this.aborted) return;
       const prev = totals[cat.id];
-      if (prev && prev.offset >= Math.min(prev.total, CFG.OFFSET_LIMIT)) return 0;
+      if (prev && prev.offset >= Math.min(prev.total, CFG.OFFSET_LIMIT)) { completed++; return; }
 
-      let offset = prev ? prev.offset : 0;
-      let empty = 0;
-      let firstTotal = prev ? prev.total : null;
+      const startOffset = prev ? prev.offset : 0;
+      const apiTotal = prev ? prev.total : CFG.OFFSET_LIMIT;
+      await this._scanCategoryForward(cat, startOffset, apiTotal, totals);
 
-      while (!this.aborted) {
-        if (offset >= CFG.OFFSET_LIMIT) break;
-        const r = await this.api.searchProducts({ categoryId: cat.id, offset });
-        if (!r) { empty++; if (empty >= 3) break; await delay(1000); continue; }
-        if (r._offsetLimit) break;
-        empty = 0;
-        const items = (r.items || []).map(i => i?.catalogCard).filter(Boolean);
-        if (!items.length) break;
-        if (firstTotal === null && r.total != null) firstTotal = r.total;
-        await this._upsert(items, cat);
-        offset += CFG.BATCH_SIZE;
-        if (this.aborted) return 0;
-        await delay(CFG.REQUEST_DELAY_MS);
-      }
-
-      const catCollected = offset - (prev ? prev.offset : 0);
-      if (firstTotal) {
-        totals[cat.id] = { total: firstTotal, offset: Math.min(offset, firstTotal) };
+      completed++;
+      if (completed % CFG.SAVE_EVERY_N_CATS === 0) {
         await this.db.setState('cat_totals', totals);
+        Log.info(`Progress: ${completed}/${filtered.length} categories (${Math.round(completed / filtered.length * 100)}%)`);
       }
-      return catCollected;
-    }, 20);
+    }, CFG.CONCURRENCY);
 
     if (!this.aborted) {
-      this.collectedCount += perCat.reduce((s, v) => s + v, 0);
-      this._c(this.collectedCount);
-      await this.db.deleteState('resume_cat_idx');
-      await this.db.deleteState('resume_offset');
-      await this.db.setState('collected_count', this.collectedCount);
+      await this.db.setState('cat_totals', totals);
     }
-  }
-
-  async _collectBySearch() {
-    let offset = await this.db.getState('resume_offset', 0);
-    // If saved resume offset is past the limit, reset
-    if (offset >= CFG.OFFSET_LIMIT) offset = 0;
-    let empty = 0;
-    while (!this.aborted) {
-      if (offset >= CFG.OFFSET_LIMIT) {
-        Log.warn('Search: reached offset limit, stopping');
-        break;
-      }
-      const r = await this.api.searchProducts({ offset });
-      if (!r) { empty++; if (empty >= 3) break; await delay(2000); continue; }
-      if (r._offsetLimit) break;
-      empty = 0;
-      const items = (r.items || []).map(i => i?.catalogCard).filter(Boolean);
-      if (!items.length) break;
-      await this._upsert(items); this.collectedCount += items.length; this._c(this.collectedCount);
-      offset += CFG.BATCH_SIZE; await delay(CFG.REQUEST_DELAY_MS);
-    }
-    await this.db.deleteState('resume_offset');
   }
 
   async _upsert(cards, cat) {
@@ -550,7 +561,7 @@ class ProductCollector {
    =================================================================== */
 function createUI(db, collector) {
   GM_addStyle(`
-    #uz-panel{position:fixed;top:80px;right:16px;z-index:999999;width:320px;background:#1a1a2e;border:1px solid #333;border-radius:10px;padding:14px 16px;font:13px -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;color:#e0e0e0;box-shadow:0 4px 24px rgba(0,0,0,.5);user-select:none}
+    #uz-panel{position:fixed;top:80px;right:16px;z-index:999999;width:320px;background:#1a1a2e;border:1px solid #333;border-radius:10px;padding:14px 16px;font:13px -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;color:#e0e0e0;box-shadow:0 4px 24px rgba(0,0,0,.5)}
     #uz-panel h3{margin:0 0 10px 0;font-size:15px;font-weight:700;color:#fff;display:flex;align-items:center;gap:8px}
     #uz-panel h3 span{color:#6c63ff}
     #uz-panel .r{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
@@ -572,7 +583,7 @@ function createUI(db, collector) {
     #uz-panel .log::-webkit-scrollbar-thumb{background:#444;border-radius:2px}
   `);
   const p = document.createElement('div'); p.id = 'uz-panel';
-  p.innerHTML = `<h3>📦 <span>Uzum</span> Collector v2.6</h3><div class="r"><span class="l">Status</span><span class="v" id="uz-s">Idle</span></div><div class="r"><span class="l">Collected</span><span class="v" id="uz-c">0</span></div><div class="r"><button class="bs" id="uz-go">▶ Start</button><button class="bp" id="uz-st" disabled>■ Stop</button></div><div class="br"><button class="be" id="uz-ex">Export JSON</button><button class="brf" id="uz-rf">↻ Refresh</button></div><div class="log" id="uz-log"></div>`;
+  p.innerHTML = `<h3>📦 <span>Uzum</span> Collector v${VERSION}</h3><div class="r"><span class="l">Status</span><span class="v" id="uz-s">Idle</span></div><div class="r"><span class="l">Collected</span><span class="v" id="uz-c">0</span></div><div class="r"><button class="bs" id="uz-go">▶ Start</button><button class="bp" id="uz-st" disabled>■ Stop</button></div><div class="br"><button class="be" id="uz-ex">Export JSON</button><button class="brf" id="uz-rf">↻ Refresh</button></div><div class="log" id="uz-log"></div>`;
   document.body.appendChild(p);
   const s = p.querySelector('#uz-s'), c = p.querySelector('#uz-c'), go = p.querySelector('#uz-go'), st = p.querySelector('#uz-st'), ex = p.querySelector('#uz-ex'), rf = p.querySelector('#uz-rf'), lg = p.querySelector('#uz-log');
   Log.init(lg);
@@ -588,7 +599,7 @@ function createUI(db, collector) {
     if (!ok && !collector.aborted) go.disabled = false;
     if (!collector.running) { st.disabled = true; }
   });
-  st.addEventListener('click', () => { collector.stop(); go.disabled = false; st.disabled = true; s.textContent = 'Stopped'; db.setState('status', 'stopped'); });
+  st.addEventListener('click', () => { collector.stop(); go.disabled = false; st.disabled = true; s.textContent = 'Stopped (partial)'; db.setState('status', 'stopped'); });
   ex.addEventListener('click', async () => {
     ex.disabled = true;
     try {
@@ -614,7 +625,6 @@ function createUI(db, collector) {
 
 function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-// Concurrency-limited parallel map — runs fn on each item with at most N inflight
 async function pMap(items, fn, concurrency = 20) {
   const results = new Array(items.length);
   let idx = 0;
@@ -633,7 +643,7 @@ async function pMap(items, fn, concurrency = 20) {
    =================================================================== */
 (async function () {
   'use strict';
-  Log.info('Uzum Collector v2.6 initializing...');
+  Log.info(`Uzum Collector v${VERSION} initializing...`);
   const db = new ProductDB();
   try { await db.open(); Log.info('IndexedDB ready'); } catch (e) { Log.error('DB: ' + e.message); return; }
   const api = new UzumApi();
@@ -644,6 +654,6 @@ async function pMap(items, fn, concurrency = 20) {
   ui.c.textContent = String(count);
   const saved = await db.getState('status', 'idle');
   if (saved === 'collection_done') ui.s.textContent = 'Collection done';
-  else if (saved === 'stopped') ui.s.textContent = 'Stopped (data OK)';
+  else if (saved === 'stopped') ui.s.textContent = 'Stopped (partial)';
   Log.info(`Ready. ${count} products.`);
 })();
