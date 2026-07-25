@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Uzum Marketplace Collector
 // @namespace    https://uzum.uz/
-// @version      2.4.0
+// @version      2.5.0
 // @description  Collects Uzum (uzum.uz) marketplace product catalog into IndexedDB. Exports JSONL. One-shot collection, resume on restart.
 // @author       
 // @match        https://uzum.uz/*
@@ -168,7 +168,7 @@ class ProductDB {
   exportAll() {
     // JSONL export — one JSON object per line, no wrapper. Append-friendly.
     return this.getAllProducts().then(products => {
-      const header = JSON.stringify({ exportedAt: new Date().toISOString(), totalProducts: products.length, version: '2.4.0', source: 'uzum.uz' });
+      const header = JSON.stringify({ exportedAt: new Date().toISOString(), totalProducts: products.length, version: '2.5.0', source: 'uzum.uz' });
       const lines = products.map(p => JSON.stringify(p));
       return header + '\n' + lines.join('\n');
     });
@@ -299,6 +299,28 @@ class ProductCollector {
     } catch (e) { Log.error('Failed: ' + e.message); this._s('Error'); this.running = false; return false; }
   }
 
+  async refresh() {
+    Log.info('Refresh: scanning for new products...'); this._s('Refreshing...');
+    const oldCount = await this.db.getProductCount();
+    try {
+      await this.db.deleteState('status'); // clear guard so start() runs
+      this.running = true; this.aborted = false;
+      const cats = await this._getLeaves();
+      if (cats.length) await this._collectByCat(cats);
+      else { Log.warn('No cats, trying search'); await this._collectBySearch(); }
+      this.running = false;
+      const newCount = await this.db.getProductCount();
+      const added = newCount - oldCount;
+      Log.info(`Refresh done. ${added} new, ${newCount} total.`);
+      await this.db.setState('status', 'collection_done');
+      this._s('Done ✓'); this._c(newCount);
+    } catch (e) {
+      Log.error('Refresh failed: ' + e.message);
+      await this.db.setState('status', 'collection_done');
+      this._s('Error'); this.running = false;
+    }
+  }
+
   stop() { this.aborted = true; this.running = false; this._s('Stopping...'); }
 
   async _getLeaves() {
@@ -412,15 +434,17 @@ function createUI(db, collector) {
     #uz-panel .bp:hover:not(:disabled){background:#c0392b}
     #uz-panel .be{background:#3498db;color:#fff}
     #uz-panel .be:hover:not(:disabled){background:#2980b9}
+    #uz-panel .brf{background:#f39c12;color:#fff}
+    #uz-panel .brf:hover:not(:disabled){background:#e67e22}
     #uz-panel .br{display:flex;gap:6px;margin-top:8px}
     #uz-panel .log{margin-top:8px;max-height:120px;overflow-y:auto;background:rgba(0,0,0,.3);border-radius:4px;padding:6px 8px;font:11px 'SF Mono',Monaco,'Cascadia Code',monospace;color:#aaa;line-height:1.5}
     #uz-panel .log::-webkit-scrollbar{width:4px}
     #uz-panel .log::-webkit-scrollbar-thumb{background:#444;border-radius:2px}
   `);
   const p = document.createElement('div'); p.id = 'uz-panel';
-  p.innerHTML = `<h3>📦 <span>Uzum</span> Collector v2.4</h3><div class="r"><span class="l">Status</span><span class="v" id="uz-s">Idle</span></div><div class="r"><span class="l">Collected</span><span class="v" id="uz-c">0</span></div><div class="r"><button class="bs" id="uz-go">▶ Start</button><button class="bp" id="uz-st" disabled>■ Stop</button></div><div class="br"><button class="be" id="uz-ex">Export JSON</button></div><div class="log" id="uz-log"></div>`;
+  p.innerHTML = `<h3>📦 <span>Uzum</span> Collector v2.5</h3><div class="r"><span class="l">Status</span><span class="v" id="uz-s">Idle</span></div><div class="r"><span class="l">Collected</span><span class="v" id="uz-c">0</span></div><div class="r"><button class="bs" id="uz-go">▶ Start</button><button class="bp" id="uz-st" disabled>■ Stop</button></div><div class="br"><button class="be" id="uz-ex">Export JSON</button><button class="brf" id="uz-rf">↻ Refresh</button></div><div class="log" id="uz-log"></div>`;
   document.body.appendChild(p);
-  const s = p.querySelector('#uz-s'), c = p.querySelector('#uz-c'), go = p.querySelector('#uz-go'), st = p.querySelector('#uz-st'), ex = p.querySelector('#uz-ex'), lg = p.querySelector('#uz-log');
+  const s = p.querySelector('#uz-s'), c = p.querySelector('#uz-c'), go = p.querySelector('#uz-go'), st = p.querySelector('#uz-st'), ex = p.querySelector('#uz-ex'), rf = p.querySelector('#uz-rf'), lg = p.querySelector('#uz-log');
   Log.init(lg);
   let drag = false, ox, oy;
   p.querySelector('h3').style.cursor = 'grab';
@@ -445,6 +469,14 @@ function createUI(db, collector) {
       document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
     } catch (e) { Log.error('Export: ' + e.message); }
     ex.disabled = false;
+  });
+  rf.addEventListener('click', async () => {
+    if (collector.running) return;
+    rf.disabled = true; go.disabled = true; st.disabled = false;
+    collector.setUI(s, c);
+    await collector.refresh();
+    rf.disabled = false; st.disabled = true;
+    if (!collector.running) go.disabled = false;
   });
   GM_registerMenuCommand('▶ Start', () => go.click()); GM_registerMenuCommand('■ Stop', () => st.click()); GM_registerMenuCommand('⬇ Export', () => ex.click());
   return { go, st, s, c };
