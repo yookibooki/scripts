@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Uzum Marketplace Collector
 // @namespace    https://uzum.uz/
-// @version      2.8.0
+// @version      2.9.1
 // @description  Collects Uzum (uzum.uz) marketplace product catalog into IndexedDB. Exports JSONL. One-shot collection, resume on restart.
 // @author
 // @match        https://uzum.uz/*
@@ -19,17 +19,17 @@ const CFG = {
   DB_VERSION: 3,
   PRODUCTS_STORE: 'products',
   STATE_STORE: 'state',
-  BATCH_SIZE: 48,
-  REQUEST_DELAY_MS: 400,
+  BATCH_SIZE: 100, // API max is 100
+  REQUEST_DELAY_MS: 500,
   REQUEST_TIMEOUT_MS: 30000,
   SAVE_EVERY_N_CATS: 50,
   OFFSET_LIMIT: 9936,
   GRAPHQL_URL: 'https://graphql.uzum.uz/',
   REST_BASE: 'https://api.uzum.uz/api',
-  CONCURRENCY: 20,
+  CONCURRENCY: 10,
 };
 
-const VERSION = '2.8.0';
+const VERSION = '2.9.1';
 
 /* ===================================================================
    LOGGER
@@ -303,12 +303,6 @@ class ProductCollector {
     if (this._lock) return false;
     this._lock = true;
     try {
-      const done = await this.db.getState('status');
-      if (done === 'collection_done') {
-        Log.info('Collection already done. Use Export JSON to re-export.');
-        this._s('Done ✓'); this._c(await this.db.getProductCount());
-        return true;
-      }
       this.running = true; this.aborted = false;
       Log.info('Starting collection...'); this._s('Collecting...');
 
@@ -333,139 +327,7 @@ class ProductCollector {
     }
   }
 
-  async refresh() {
-    if (this._lock) return;
-    this._lock = true;
-    Log.info('Refresh: scanning for new products...'); this._s('Refreshing...');
-    const oldCount = await this.db.getProductCount();
-    try {
-      await this.db.deleteState('status');
-      this.running = true; this.aborted = false;
-      const cats = await this._getLeaves();
-      if (!cats.length) {
-        Log.error('Failed to load categories. Cannot refresh.');
-        this._s('Error: no categories');
-        this.running = false;
-        return;
-      }
-      let stored = await this.db.getState('cat_totals', null);
-      if (!stored) {
-        Log.info('Building category index first...');
-        stored = await this._bootstrapCatTotals(cats);
-      }
-      if (this.aborted) { this._s('Stopped (partial)'); await this.db.setState('status', 'collection_done'); this.running = false; return; }
-      const scannedCats = await this._refreshByCat(cats, stored);
-      this.running = false;
-      const newCount = await this.db.getProductCount();
-      const added = newCount - oldCount;
-      Log.info(`Refresh done. +${added} new, ${newCount} total (${scannedCats} cats changed).`);
-      await this.db.setState('status', 'collection_done');
-      this._s('Done ✓'); this._c(newCount);
-    } catch (e) {
-      Log.error('Refresh failed: ' + e.message);
-      await this.db.setState('status', 'collection_done');
-      this._s('Error'); this.running = false;
-    } finally {
-      this._lock = false;
-    }
-  }
-
   stop() { this.aborted = true; this.running = false; this._s('Stopping...'); }
-
-  async _bootstrapCatTotals(cats) {
-    Log.info('Building category index from DB...');
-    const catCounts = await this.db.getCategoryCounts();
-    const totals = {};
-    let done = 0;
-    const filtered = cats.filter(c => c.id);
-
-    await pMap(filtered, async (cat) => {
-      if (this.aborted) return;
-      let r = null;
-      try {
-        r = await this.api.searchProducts({ categoryId: cat.id, offset: 0, limit: 1 });
-      } catch (e) {
-        await delay(2000);
-        try { r = await this.api.searchProducts({ categoryId: cat.id, offset: 0, limit: 1 }); } catch (e2) { /* skip */ }
-      }
-      if (r && r.total) {
-        const have = catCounts[cat.id] || 0;
-        totals[cat.id] = { total: r.total, offset: Math.min(have, r.total) };
-      } else {
-        Log.warn(`Category ${cat.title} (${cat.id}): no total returned`);
-      }
-      done++;
-      if (done % 250 === 0) {
-        Log.info(`Category index: ${done}/${filtered.length} (${Math.round(done / filtered.length * 100)}%)`);
-      }
-    }, CFG.CONCURRENCY);
-
-    if (this.aborted) return totals;
-    await this.db.setState('cat_totals', totals);
-    Log.info(`Category index built (${Object.keys(totals).length} cats)`);
-    return totals;
-  }
-
-  async _refreshByCat(cats, stored) {
-    const totals = { ...stored };
-    const changed = [];
-    const filtered = cats.filter(c => c.id);
-
-    Log.info('Checking category totals...');
-
-    const results = await pMap(filtered, async (cat) => {
-      if (this.aborted) return null;
-      let r = null;
-      try {
-        r = await this.api.searchProducts({ categoryId: cat.id, offset: 0, limit: CFG.BATCH_SIZE });
-      } catch (e) {
-        await delay(2000);
-        try { r = await this.api.searchProducts({ categoryId: cat.id, offset: 0, limit: CFG.BATCH_SIZE }); } catch (e2) { /* skip */ }
-      }
-      if (!r) return null;
-      return { cat, r };
-    }, CFG.CONCURRENCY);
-
-    if (this.aborted) { await this.db.setState('cat_totals', totals); return 0; }
-
-    for (const result of results) {
-      if (!result) continue;
-      const { cat, r } = result;
-      const curTotal = r.total || 0;
-      const prev = stored[cat.id];
-      const needDeep = !prev || curTotal > prev.total || (prev.offset < Math.min(prev.total, CFG.OFFSET_LIMIT));
-      if (needDeep) {
-        const items = (r.items || []).map(i => i?.catalogCard).filter(Boolean);
-        if (items.length) {
-          await this._upsert(items, cat);
-          this.collectedCount += items.length; this._c(this.collectedCount);
-        }
-        changed.push(cat);
-        totals[cat.id] = { total: curTotal, offset: prev ? prev.offset : 0 };
-      } else {
-        totals[cat.id] = prev;
-      }
-    }
-    if (this.aborted) { await this.db.setState('cat_totals', totals); return 0; }
-
-    Log.info(`${changed.length} categories changed, scanning new pages...`);
-
-    // Parallel deep scan of changed categories
-    let scanned = 0;
-    await pMap(changed, async (cat) => {
-      if (this.aborted) return;
-      const cur = totals[cat.id];
-      await this._scanCategoryForward(cat, cur.offset, cur.total, totals);
-      scanned++;
-      if (scanned % CFG.SAVE_EVERY_N_CATS === 0) {
-        await this.db.setState('cat_totals', totals);
-        Log.info(`Deep scan: ${scanned}/${changed.length} categories`);
-      }
-    }, CFG.CONCURRENCY);
-
-    await this.db.setState('cat_totals', totals);
-    return changed.length;
-  }
 
   async _scanCategoryForward(cat, startOffset, apiTotal, totalsMap) {
     const limit = Math.min(apiTotal, CFG.OFFSET_LIMIT);
@@ -510,11 +372,37 @@ class ProductCollector {
     await pMap(filtered, async (cat) => {
       if (this.aborted) return;
       const prev = totals[cat.id];
-      if (prev && prev.offset >= Math.min(prev.total, CFG.OFFSET_LIMIT)) { completed++; return; }
 
-      const startOffset = prev ? prev.offset : 0;
-      const apiTotal = prev ? prev.total : CFG.OFFSET_LIMIT;
-      await this._scanCategoryForward(cat, startOffset, apiTotal, totals);
+      // Fetch first page to get current API total and upsert any items
+      let r = null;
+      try {
+        r = await this.api.searchProducts({ categoryId: cat.id, offset: 0, limit: CFG.BATCH_SIZE });
+      } catch (e) {
+        await delay(2000);
+        try { r = await this.api.searchProducts({ categoryId: cat.id, offset: 0, limit: CFG.BATCH_SIZE }); } catch (e2) { /* skip */ }
+      }
+      if (!r || !r.items) { completed++; return; }
+
+      const curTotal = r.total || 0;
+      const items = (r.items || []).map(i => i?.catalogCard).filter(Boolean);
+      if (items.length) {
+        await this._upsert(items, cat);
+        this.collectedCount += items.length; this._c(this.collectedCount);
+      }
+
+      // No total means nothing more to scan
+      if (!curTotal) { totals[cat.id] = { total: 0, offset: 0 }; completed++; return; }
+
+      const limit = Math.min(curTotal, CFG.OFFSET_LIMIT);
+      // First page (offset 0) already collected above, start from next offset
+      const startOffset = prev ? Math.max(prev.offset, CFG.BATCH_SIZE) : Math.min(CFG.BATCH_SIZE, limit);
+      if (startOffset >= limit) {
+        totals[cat.id] = { total: curTotal, offset: limit };
+        completed++;
+        return;
+      }
+
+      await this._scanCategoryForward(cat, startOffset, curTotal, totals);
 
       completed++;
       if (completed % CFG.SAVE_EVERY_N_CATS === 0) {
@@ -575,17 +463,15 @@ function createUI(db, collector) {
     #uz-panel .bp:hover:not(:disabled){background:#c0392b}
     #uz-panel .be{background:#3498db;color:#fff}
     #uz-panel .be:hover:not(:disabled){background:#2980b9}
-    #uz-panel .brf{background:#f39c12;color:#fff}
-    #uz-panel .brf:hover:not(:disabled){background:#e67e22}
     #uz-panel .br{display:flex;gap:6px;margin-top:8px}
     #uz-panel .log{margin-top:8px;max-height:120px;overflow-y:auto;background:rgba(0,0,0,.3);border-radius:4px;padding:6px 8px;font:11px 'SF Mono',Monaco,'Cascadia Code',monospace;color:#aaa;line-height:1.5}
     #uz-panel .log::-webkit-scrollbar{width:4px}
     #uz-panel .log::-webkit-scrollbar-thumb{background:#444;border-radius:2px}
   `);
   const p = document.createElement('div'); p.id = 'uz-panel';
-  p.innerHTML = `<h3>📦 <span>Uzum</span> Collector v${VERSION}</h3><div class="r"><span class="l">Status</span><span class="v" id="uz-s">Idle</span></div><div class="r"><span class="l">Collected</span><span class="v" id="uz-c">0</span></div><div class="r"><button class="bs" id="uz-go">▶ Start</button><button class="bp" id="uz-st" disabled>■ Stop</button></div><div class="br"><button class="be" id="uz-ex">Export JSON</button><button class="brf" id="uz-rf">↻ Refresh</button></div><div class="log" id="uz-log"></div>`;
+  p.innerHTML = `<h3>📦 <span>Uzum</span> Collector v${VERSION}</h3><div class="r"><span class="l">Status</span><span class="v" id="uz-s">Idle</span></div><div class="r"><span class="l">Collected</span><span class="v" id="uz-c">0</span></div><div class="r"><button class="bs" id="uz-go">▶ Start</button><button class="bp" id="uz-st" disabled>■ Stop</button></div><div class="br"><button class="be" id="uz-ex">Export JSON</button></div><div class="log" id="uz-log"></div>`;
   document.body.appendChild(p);
-  const s = p.querySelector('#uz-s'), c = p.querySelector('#uz-c'), go = p.querySelector('#uz-go'), st = p.querySelector('#uz-st'), ex = p.querySelector('#uz-ex'), rf = p.querySelector('#uz-rf'), lg = p.querySelector('#uz-log');
+  const s = p.querySelector('#uz-s'), c = p.querySelector('#uz-c'), go = p.querySelector('#uz-go'), st = p.querySelector('#uz-st'), ex = p.querySelector('#uz-ex'), lg = p.querySelector('#uz-log');
   Log.init(lg);
   let drag = false, ox, oy;
   p.querySelector('h3').style.cursor = 'grab';
@@ -596,7 +482,7 @@ function createUI(db, collector) {
     go.disabled = true; st.disabled = false; s.textContent = 'Starting...';
     collector.setUI(s, c);
     const ok = await collector.start();
-    if (!ok && !collector.aborted) go.disabled = false;
+    go.disabled = false;
     if (!collector.running) { st.disabled = true; }
   });
   st.addEventListener('click', () => { collector.stop(); go.disabled = false; st.disabled = true; s.textContent = 'Stopped (partial)'; db.setState('status', 'stopped'); });
@@ -610,14 +496,6 @@ function createUI(db, collector) {
       document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
     } catch (e) { Log.error('Export: ' + e.message); }
     ex.disabled = false;
-  });
-  rf.addEventListener('click', async () => {
-    if (collector.running) return;
-    rf.disabled = true; go.disabled = true; st.disabled = false;
-    collector.setUI(s, c);
-    await collector.refresh();
-    rf.disabled = false; st.disabled = true;
-    if (!collector.running) go.disabled = false;
   });
   GM_registerMenuCommand('▶ Start', () => go.click()); GM_registerMenuCommand('■ Stop', () => st.click()); GM_registerMenuCommand('⬇ Export', () => ex.click());
   return { go, st, s, c };
@@ -652,8 +530,6 @@ async function pMap(items, fn, concurrency = 20) {
   const ui = createUI(db, collector);
   const count = await db.getProductCount();
   ui.c.textContent = String(count);
-  const saved = await db.getState('status', 'idle');
-  if (saved === 'collection_done') ui.s.textContent = 'Collection done';
-  else if (saved === 'stopped') ui.s.textContent = 'Stopped (partial)';
+  ui.s.textContent = count > 0 ? `${count} products` : 'Idle';
   Log.info(`Ready. ${count} products.`);
 })();
