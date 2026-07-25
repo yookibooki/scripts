@@ -1,10 +1,75 @@
-use olx_watch::*;
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashSet, VecDeque};
 use std::fs;
 use std::io::Write;
+use std::path::PathBuf;
 use std::time::Duration;
+
+pub const API: &str = "https://www.olx.uz/api/v1/offers";
+pub const USER_AGENT: &str =
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
+
+#[derive(Debug, Deserialize)]
+pub struct ApiResponse {
+    pub data: Option<Vec<serde_json::Value>>,
+}
+
+/// Returns ~/.local/share/olx, creating a cross-platform PathBuf.
+pub fn data_dir() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join(".local/share/olx")
+}
+
+/// Fetch and deserialize the JSON body from a URL.
+/// Retries on transient HTTP errors (which the OLX CDN returns intermittently).
+pub fn fetch_json(agent: &ureq::Agent, url: &str) -> Option<serde_json::Value> {
+    for attempt in 0..3 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(500 * attempt));
+        }
+
+        let resp = match agent.get(url).header("Accept", "application/json").call() {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("[ERROR] HTTP request failed: {e}");
+                continue;
+            }
+        };
+
+        let status = resp.status();
+        if status == 200 {
+            let text = match resp.into_body().read_to_string() {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("[ERROR] Failed to read response body: {e}");
+                    continue;
+                }
+            };
+            return match serde_json::from_str::<serde_json::Value>(&text) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    eprintln!("[ERROR] JSON parse error: {e}");
+                    None
+                }
+            };
+        }
+
+        let text = resp.into_body().read_to_string().unwrap_or_default();
+        let preview = if text.is_empty() {
+            "(empty)"
+        } else {
+            &text[..text.len().min(200)]
+        };
+        eprintln!("[WARN] HTTP {status}: {preview}");
+    }
+    None
+}
+
+/// Extract the numeric ID from an offer.
+pub fn extract_id(offer: &serde_json::Value) -> Option<u64> {
+    offer.get("id").and_then(|v| v.as_u64())
+}
 
 // OLX API contracts (external behaviors, not internal design choices):
 // - The API rejects limit values > 50 but always returns ~52 items per page.
@@ -41,7 +106,9 @@ fn acquire_lock() -> fs::File {
 
 // ── State ─────────────────────────────────────────────────────────────────
 
-fn default_version() -> u64 { 1 }
+fn default_version() -> u64 {
+    1
+}
 
 #[derive(Serialize, Deserialize)]
 struct State {
@@ -97,7 +164,14 @@ fn trim_offer(offer: &serde_json::Value) -> String {
     let mut r = Map::new();
 
     // Top-level keepers
-    for key in &["id", "url", "title", "business", "created_time", "last_refresh_time"] {
+    for key in &[
+        "id",
+        "url",
+        "title",
+        "business",
+        "created_time",
+        "last_refresh_time",
+    ] {
         if let Some(v) = offer.get(*key) {
             r.insert(key.to_string(), v.clone());
         }
@@ -107,7 +181,11 @@ fn trim_offer(offer: &serde_json::Value) -> String {
     if let Some(params) = offer.get("params").and_then(|v| v.as_array()) {
         for p in params {
             if p.get("key").and_then(|v| v.as_str()) == Some("price") {
-                if let Some(cv) = p.get("value").and_then(|v| v.get("converted_value")).and_then(|v| v.as_f64()) {
+                if let Some(cv) = p
+                    .get("value")
+                    .and_then(|v| v.get("converted_value"))
+                    .and_then(|v| v.as_f64())
+                {
                     r.insert("price_uzs".to_string(), serde_json::json!(cv as u64));
                 }
                 break;
@@ -124,7 +202,11 @@ fn trim_offer(offer: &serde_json::Value) -> String {
 
     // Location: flat name fields
     if let Some(loc) = offer.get("location") {
-        for (flat, src) in &[("location_city", "city"), ("location_district", "district"), ("location_region", "region")] {
+        for (flat, src) in &[
+            ("location_city", "city"),
+            ("location_district", "district"),
+            ("location_region", "region"),
+        ] {
             if let Some(v) = loc.get(*src) {
                 if let Some(name) = v.get("name").and_then(|n| n.as_str()) {
                     r.insert(flat.to_string(), serde_json::json!(name));
@@ -151,8 +233,12 @@ mod tests {
 
     #[test]
     fn test_state_load_missing() {
-        let state = serde_json::from_str::<State>("")
-            .unwrap_or(State { version: 1, max_id: 0, initial_complete: false, known_categories: Vec::new() });
+        let state = serde_json::from_str::<State>("").unwrap_or(State {
+            version: 1,
+            max_id: 0,
+            initial_complete: false,
+            known_categories: Vec::new(),
+        });
         assert_eq!(state.version, 1);
         assert_eq!(state.max_id, 0);
         assert!(!state.initial_complete);
@@ -171,7 +257,8 @@ mod tests {
 
     #[test]
     fn test_state_load_current_with_version() {
-        let json = r#"{"version": 1, "max_id": 99, "initial_complete": false, "known_categories": []}"#;
+        let json =
+            r#"{"version": 1, "max_id": 99, "initial_complete": false, "known_categories": []}"#;
         let state: State = serde_json::from_str(json).unwrap();
         assert_eq!(state.version, 1);
         assert_eq!(state.max_id, 99);
@@ -208,7 +295,9 @@ fn fetch_page(
     offset: u64,
 ) -> (Vec<serde_json::Value>, bool) {
     let url = match category_id {
-        Some(cid) => format!("{API}/?offset={offset}&limit={PAGE_SIZE}&category_id={cid}&sort_by=created_at:desc"),
+        Some(cid) => format!(
+            "{API}/?offset={offset}&limit={PAGE_SIZE}&category_id={cid}&sort_by=created_at:desc"
+        ),
         None => format!("{API}/?offset={offset}&limit={PAGE_SIZE}&sort_by=created_at:desc"),
     };
 
@@ -439,9 +528,7 @@ fn main() {
     // ── Ongoing poll (single cycle, or loop if POLL_INTERVAL is set) ──
     if poll_interval > 0 {
         // Daemon mode: loop forever
-        eprintln!(
-            "[INFO] Daemon mode started (poll interval = {poll_interval}ms)"
-        );
+        eprintln!("[INFO] Daemon mode started (poll interval = {poll_interval}ms)");
         loop {
             let n = phase2_poll_new(&agent, &mut state);
             save_state(&state);

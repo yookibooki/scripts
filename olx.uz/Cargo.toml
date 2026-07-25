@@ -3,10 +3,6 @@ name = "olx-watch"
 version = "0.1.0"
 edition = "2024"
 
-[[bin]]
-name = "olx-watch"
-path = "src/main.rs"
-
 [dependencies]
 ureq = "3"
 serde = { version = "1", features = ["derive"] }
