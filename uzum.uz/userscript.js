@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Uzum Marketplace Collector
 // @namespace    https://uzum.uz/
-// @version      2.5.0
+// @version      2.6.0
 // @description  Collects Uzum (uzum.uz) marketplace product catalog into IndexedDB. Exports JSONL. One-shot collection, resume on restart.
 // @author       
 // @match        https://uzum.uz/*
@@ -168,7 +168,7 @@ class ProductDB {
   exportAll() {
     // JSONL export — one JSON object per line, no wrapper. Append-friendly.
     return this.getAllProducts().then(products => {
-      const header = JSON.stringify({ exportedAt: new Date().toISOString(), totalProducts: products.length, version: '2.5.0', source: 'uzum.uz' });
+      const header = JSON.stringify({ exportedAt: new Date().toISOString(), totalProducts: products.length, version: '2.6.0', source: 'uzum.uz' });
       const lines = products.map(p => JSON.stringify(p));
       return header + '\n' + lines.join('\n');
     });
@@ -303,15 +303,21 @@ class ProductCollector {
     Log.info('Refresh: scanning for new products...'); this._s('Refreshing...');
     const oldCount = await this.db.getProductCount();
     try {
-      await this.db.deleteState('status'); // clear guard so start() runs
+      await this.db.deleteState('status');
       this.running = true; this.aborted = false;
       const cats = await this._getLeaves();
-      if (cats.length) await this._collectByCat(cats);
-      else { Log.warn('No cats, trying search'); await this._collectBySearch(); }
+      // Ensure we have category totals to work with
+      let stored = await this.db.getState('cat_totals', null);
+      if (!stored) {
+        Log.info('Building category index first...');
+        stored = await this._bootstrapCatTotals(cats);
+      }
+      if (this.aborted) { this._s('Stopped'); await this.db.setState('status', 'collection_done'); this.running = false; return; }
+      const scannedCats = await this._refreshByCat(cats, stored);
       this.running = false;
       const newCount = await this.db.getProductCount();
       const added = newCount - oldCount;
-      Log.info(`Refresh done. ${added} new, ${newCount} total.`);
+      Log.info(`Refresh done. ${added} new, ${newCount} total (${scannedCats} categories changed).`);
       await this.db.setState('status', 'collection_done');
       this._s('Done ✓'); this._c(newCount);
     } catch (e) {
@@ -323,6 +329,98 @@ class ProductCollector {
 
   stop() { this.aborted = true; this.running = false; this._s('Stopping...'); }
 
+  // Bootstrap cat_totals from DB counts + API totals (one-time after upgrade)
+  async _bootstrapCatTotals(cats) {
+    Log.info('Building category index from DB...');
+    // Count existing products per category directly from IndexedDB
+    const allProds = await this.db.getAllProducts();
+    const catCounts = {};
+    for (const p of allProds) {
+      const cid = p.categoryId;
+      if (cid) catCounts[cid] = (catCounts[cid] || 0) + 1;
+    }
+    const totals = {};
+    for (let ci = 0; ci < cats.length; ci++) {
+      if (this.aborted) return totals;
+      const cat = cats[ci];
+      if (!cat.id) continue;
+      const r = await this.api.searchProducts({ categoryId: cat.id, offset: 0, limit: 1 });
+      if (r && r.total) {
+        const have = catCounts[cat.id] || 0;
+        totals[cat.id] = { total: r.total, offset: Math.min(have, r.total) };
+      }
+    }
+    await this.db.setState('cat_totals', totals);
+    Log.info(`Category index built (${Object.keys(totals).length} cats, offset≈DB count)`);
+    return totals;
+  }
+
+  // Smart refresh: quick page-0 pass, then scan only categories that grew
+  async _refreshByCat(cats, stored) {
+    const totals = { ...stored };
+    const changed = [];
+
+    Log.info('Checking category totals...');
+    for (let ci = 0; ci < cats.length && !this.aborted; ci++) {
+      const cat = cats[ci];
+      if (!cat.id) continue;
+      const r = await this.api.searchProducts({ categoryId: cat.id, offset: 0, limit: CFG.BATCH_SIZE });
+      if (!r) continue;
+      const curTotal = r.total || 0;
+      const prev = stored[cat.id];
+      const needDeep = !prev || curTotal > prev.total || (prev.offset < Math.min(prev.total, CFG.OFFSET_LIMIT));
+      if (needDeep) {
+        // upsert page 0 immediately — catches hot new products
+        const items = (r.items || []).map(i => i?.catalogCard).filter(Boolean);
+        if (items.length) {
+          await this._upsert(items, cat);
+          this.collectedCount += items.length; this._c(this.collectedCount);
+        }
+        changed.push(cat);
+        totals[cat.id] = { total: curTotal, offset: prev ? prev.offset : 0 };
+      } else {
+        // category unchanged — still record its total in case totals object is fresh
+        totals[cat.id] = prev;
+      }
+    }
+    if (this.aborted) { await this.db.setState('cat_totals', totals); return 0; }
+
+    Log.info(`${changed.length} categories changed, scanning new pages...`);
+    for (const cat of changed) {
+      if (this.aborted) break;
+      const cur = totals[cat.id];
+      await this._scanCategoryForward(cat, cur.offset, cur.total, totals);
+    }
+
+    await this.db.setState('cat_totals', totals);
+    return changed.length;
+  }
+
+  // Scan a single category from offset to limit-or-total, update the totals map in-place
+  async _scanCategoryForward(cat, startOffset, apiTotal, totalsMap) {
+    const limit = Math.min(apiTotal, CFG.OFFSET_LIMIT);
+    let offset = startOffset;
+    let empty = 0;
+    while (!this.aborted && offset < limit) {
+      const r = await this.api.searchProducts({ categoryId: cat.id, offset });
+      if (!r) { empty++; if (empty >= 3) break; await delay(1000); continue; }
+      if (r._offsetLimit) break;
+      empty = 0;
+      const items = (r.items || []).map(i => i?.catalogCard).filter(Boolean);
+      if (!items.length) break;
+      await this._upsert(items, cat);
+      this.collectedCount += items.length; this._c(this.collectedCount);
+      offset += CFG.BATCH_SIZE;
+      if (this.collectedCount % CFG.SAVE_INTERVAL === 0) {
+        totalsMap[cat.id].offset = offset;
+        await this.db.setState('cat_totals', totalsMap);
+      }
+      if (this.aborted) return;
+      await delay(CFG.REQUEST_DELAY_MS);
+    }
+    totalsMap[cat.id].offset = Math.min(offset, limit);
+  }
+
   async _getLeaves() {
     const cats = await this.api.getCategories(); if (!cats.length) return [];
     const flat = []; const walk = ns => { for (const n of ns) { flat.push(n); if (n.children?.length) walk(n.children); } }; walk(cats);
@@ -332,8 +430,8 @@ class ProductCollector {
   async _collectByCat(cats) {
     let ri = 0, ro = 0;
     ri = await this.db.getState('resume_cat_idx', 0); ro = await this.db.getState('resume_offset', 0);
-    // If saved resume offset is past the limit, skip it
     if (ro && ro >= CFG.OFFSET_LIMIT) { ri++; ro = 0; }
+    const totals = {};
     for (let ci = 0; ci < cats.length; ci++) {
       if (this.aborted) return;
       if (ci < ri) continue;
@@ -341,6 +439,7 @@ class ProductCollector {
       if (!cat.id) continue;
       let offset = (ci === ri) ? ro : 0;
       let empty = 0;
+      let firstTotal = null;
       while (!this.aborted) {
         if (offset >= CFG.OFFSET_LIMIT) {
           Log.warn(`Category ${cat.title} (${cat.id}) has more products beyond offset limit`);
@@ -352,6 +451,7 @@ class ProductCollector {
         empty = 0;
         const items = (r.items || []).map(i => i?.catalogCard).filter(Boolean);
         if (!items.length) break;
+        if (firstTotal === null && r.total != null) firstTotal = r.total;
         await this._upsert(items, cat);
         this.collectedCount += items.length; this._c(this.collectedCount);
         offset += CFG.BATCH_SIZE;
@@ -361,6 +461,9 @@ class ProductCollector {
         if (this.aborted) return;
         await delay(CFG.REQUEST_DELAY_MS);
       }
+      if (firstTotal) totals[cat.id] = { total: firstTotal, offset: Math.min(offset, firstTotal) };
+      // Save totals incrementally so partial runs still help
+      await this.db.setState('cat_totals', totals);
     }
     await this.db.deleteState('resume_cat_idx'); await this.db.deleteState('resume_offset'); await this.db.setState('collected_count', this.collectedCount);
   }
@@ -442,7 +545,7 @@ function createUI(db, collector) {
     #uz-panel .log::-webkit-scrollbar-thumb{background:#444;border-radius:2px}
   `);
   const p = document.createElement('div'); p.id = 'uz-panel';
-  p.innerHTML = `<h3>📦 <span>Uzum</span> Collector v2.5</h3><div class="r"><span class="l">Status</span><span class="v" id="uz-s">Idle</span></div><div class="r"><span class="l">Collected</span><span class="v" id="uz-c">0</span></div><div class="r"><button class="bs" id="uz-go">▶ Start</button><button class="bp" id="uz-st" disabled>■ Stop</button></div><div class="br"><button class="be" id="uz-ex">Export JSON</button><button class="brf" id="uz-rf">↻ Refresh</button></div><div class="log" id="uz-log"></div>`;
+  p.innerHTML = `<h3>📦 <span>Uzum</span> Collector v2.6</h3><div class="r"><span class="l">Status</span><span class="v" id="uz-s">Idle</span></div><div class="r"><span class="l">Collected</span><span class="v" id="uz-c">0</span></div><div class="r"><button class="bs" id="uz-go">▶ Start</button><button class="bp" id="uz-st" disabled>■ Stop</button></div><div class="br"><button class="be" id="uz-ex">Export JSON</button><button class="brf" id="uz-rf">↻ Refresh</button></div><div class="log" id="uz-log"></div>`;
   document.body.appendChild(p);
   const s = p.querySelector('#uz-s'), c = p.querySelector('#uz-c'), go = p.querySelector('#uz-go'), st = p.querySelector('#uz-st'), ex = p.querySelector('#uz-ex'), rf = p.querySelector('#uz-rf'), lg = p.querySelector('#uz-log');
   Log.init(lg);
@@ -489,7 +592,7 @@ function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
    =================================================================== */
 (async function () {
   'use strict';
-  Log.info('Uzum Collector v2.4 initializing...');
+  Log.info('Uzum Collector v2.6 initializing...');
   const db = new ProductDB();
   try { await db.open(); Log.info('IndexedDB ready'); } catch (e) { Log.error('DB: ' + e.message); return; }
   const api = new UzumApi();
