@@ -1,11 +1,8 @@
-use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 pub const GRAPHQL_URL: &str = "https://graphql.uzum.uz/";
@@ -42,6 +39,7 @@ pub struct CategoriesResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MakeSearchData {
     pub make_search: Option<SearchResult>,
 }
@@ -54,10 +52,12 @@ pub struct SearchResult {
 
 #[derive(Debug, Deserialize)]
 pub struct SearchItem {
+    #[serde(rename = "catalogCard")]
     pub catalog_card: Option<ProductCard>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProductCard {
     pub product_id: u64,
     pub title: Option<String>,
@@ -71,24 +71,28 @@ pub struct ProductCard {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BuyingOptions {
     pub is_single_sku: Option<bool>,
-    pub delivery_options: Option<Vec<DeliveryOptions>>,
+    pub delivery_options: Option<DeliveryOptions>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DeliveryOptions {
     pub short_date: Option<String>,
     pub stock_type: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PromoFutureInfo {
     pub min_future_price: Option<u64>,
     pub min_future_price_date: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Badge {
     pub id: Option<u64>,
     pub text: Option<String>,
@@ -262,10 +266,7 @@ pub fn graphql_request(
         req = req.header("X-Iid", i);
     }
     let resp = req.send(&body_str).map_err(|e| format!("HTTP: {e}"))?;
-    let text = resp
-        .into_body()
-        .read_to_string()
-        .map_err(|e| format!("Body: {e}"))?;
+    let text = resp.into_body().read_to_string().map_err(|e| format!("Body: {e}"))?;
     let parsed: GqlResponse<serde_json::Value> =
         serde_json::from_str(&text).map_err(|e| format!("JSON: {e}"))?;
     if let Some(errs) = parsed.errors {
@@ -364,7 +365,6 @@ fn build_product(card: &ProductCard, cat_id: u64) -> ProductRecord {
             .buying_options
             .as_ref()
             .and_then(|bo| bo.delivery_options.as_ref())
-            .and_then(|d| d.first())
             .map(|d| DeliveryRecord {
                 short_date: d.short_date.clone(),
                 stock_type: d.stock_type.clone(),
@@ -402,15 +402,13 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
 
 // ── State persistence ────────────────────────────────────────────────
 
-fn persist(categories: &Arc<Mutex<HashMap<String, CategoryProgress>>>, item_count: &AtomicU64) {
-    let map = categories.lock();
+fn persist(categories: &HashMap<String, CategoryProgress>, item_count: u64) {
     let state = StateFile {
         version: 1,
-        categories: map.clone(),
-        item_count: item_count.load(Ordering::SeqCst),
+        categories: categories.clone(),
+        item_count,
         updated_at: iso_now(),
     };
-    drop(map);
     let tmp = state_file().with_extension("tmp");
     if let Ok(s) = serde_json::to_string(&state) {
         let _ = fs::write(&tmp, &s);
@@ -447,26 +445,22 @@ fn main() {
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok());
 
-    let categories: Arc<Mutex<HashMap<String, CategoryProgress>>> = Arc::new(Mutex::new(
-        state
-            .as_ref()
-            .map(|s| s.categories.clone())
-            .unwrap_or_default(),
-    ));
+    let mut categories: HashMap<String, CategoryProgress> = state
+        .as_ref()
+        .map(|s| s.categories.clone())
+        .unwrap_or_default();
 
-    let item_count = Arc::new(AtomicU64::new(
-        state.as_ref().map(|s| s.item_count).unwrap_or(0),
-    ));
+    let mut item_count = state.as_ref().map(|s| s.item_count).unwrap_or(0);
 
     let out = output_file();
-    let writer: Arc<Mutex<BufWriter<File>>> = if is_refresh && out.exists() {
-        Arc::new(Mutex::new(BufWriter::new(
+    let mut writer: BufWriter<File> = if is_refresh && out.exists() {
+        BufWriter::new(
             fs::OpenOptions::new()
                 .append(true)
                 .create(true)
                 .open(&out)
                 .unwrap(),
-        )))
+        )
     } else {
         let file = File::create(&out).unwrap();
         let mut w = BufWriter::new(file);
@@ -482,163 +476,158 @@ fn main() {
             .unwrap()
         )
         .ok();
-        Arc::new(Mutex::new(w))
+        w
     };
 
-    let leaves = Arc::new(leaves);
     let total = leaves.len();
-    let ts = Arc::new(ts);
-    let done = Arc::new(AtomicU64::new(0));
-    let index = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-
     eprintln!("[INFO] Scanning...");
 
-    std::thread::scope(|s| {
-        for _ in 0..5 {
-            let agent = agent.clone();
-            let writer = writer.clone();
-            let categories = categories.clone();
-            let item_count = item_count.clone();
-            let done = done.clone();
-            let index = index.clone();
-            let leaves = leaves.clone();
-            let ts = ts.clone();
+    for (i, node) in leaves.iter().enumerate() {
+        let cid = node.id;
+        let ctitle = node.title.as_deref().unwrap_or("?");
+        let key = cid.to_string();
+        let d = i as u64 + 1;
 
-            s.spawn(move || {
-                loop {
-                    let i = index.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    if i >= total {
-                        break;
+        if is_refresh {
+            if let Some(p) = categories.get(&key) {
+                if p.offset >= OFFSET_CAP || p.offset >= p.total {
+                    if d % 50 == 0 || d == total as u64 {
+                        let el = start.elapsed();
+                        eprintln!(
+                            "[INFO] {d}/{total} ({ctitle}) — {item_count} items [{}.{:03}s]",
+                            el.as_secs(),
+                            el.subsec_millis()
+                        );
+                        persist(&categories, item_count);
                     }
-                    let node = &leaves[i];
-                    let cid = node.id;
-                    let ctitle = node.title.as_deref().unwrap_or("?");
-                    let key = cid.to_string();
+                    continue;
+                }
+            }
+        }
 
-                    if is_refresh {
-                        let map = categories.lock();
-                        if let Some(p) = map.get(&key) {
-                            if p.offset >= OFFSET_CAP || p.offset >= p.total {
-                                done.fetch_add(1, Ordering::SeqCst);
-                                continue;
-                            }
-                        }
+        let first = match search_category(&agent, cid, 0, BATCH_SIZE) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("[WARN] {ctitle} ({cid}): {e}");
+                if d % 50 == 0 || d == total as u64 {
+                    let el = start.elapsed();
+                    eprintln!(
+                        "[INFO] {d}/{total} ({ctitle}) — {item_count} items [{}.{:03}s]",
+                        el.as_secs(),
+                        el.subsec_millis()
+                    );
+                    persist(&categories, item_count);
+                }
+                continue;
+            }
+        };
+
+        let api_total = first.total.unwrap_or(0);
+        if api_total == 0 {
+            if d % 50 == 0 || d == total as u64 {
+                let el = start.elapsed();
+                eprintln!(
+                    "[INFO] {d}/{total} ({ctitle}) — {item_count} items [{}.{:03}s]",
+                    el.as_secs(),
+                    el.subsec_millis()
+                );
+                persist(&categories, item_count);
+            }
+            continue;
+        }
+
+        if is_refresh {
+            if let Some(p) = categories.get(&key) {
+                if p.total == api_total && p.offset >= api_total.min(OFFSET_CAP) {
+                    if d % 50 == 0 || d == total as u64 {
+                        let el = start.elapsed();
+                        eprintln!(
+                            "[INFO] {d}/{total} ({ctitle}) — {item_count} items [{}.{:03}s]",
+                            el.as_secs(),
+                            el.subsec_millis()
+                        );
+                        persist(&categories, item_count);
                     }
+                    continue;
+                }
+            }
+        }
 
-                    let first = match search_category(&agent, cid, 0, BATCH_SIZE) {
-                        Ok(r) => r,
-                        Err(e) => {
-                            eprintln!("[WARN] {ctitle} ({cid}): {e}");
-                            done.fetch_add(1, Ordering::SeqCst);
-                            continue;
-                        }
-                    };
+        let limit = api_total.min(OFFSET_CAP);
 
-                    let api_total = first.total.unwrap_or(0);
-                    if api_total == 0 {
-                        done.fetch_add(1, Ordering::SeqCst);
-                        continue;
-                    }
+        let page_0_cards: Vec<_> = first
+            .items
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|i| i.catalog_card.as_ref())
+            .collect();
 
-                    if is_refresh {
-                        let map = categories.lock();
-                        if let Some(p) = map.get(&key) {
-                            if p.total == api_total && p.offset >= api_total.min(OFFSET_CAP) {
-                                drop(map);
-                                done.fetch_add(1, Ordering::SeqCst);
-                                continue;
-                            }
-                        }
-                    }
+        for card in &page_0_cards {
+            let p = build_product(card, cid);
+            let _ = writeln!(writer, "{}", serde_json::to_string(&p).unwrap());
+            item_count += 1;
+        }
 
-                    let limit = api_total.min(OFFSET_CAP);
-
-                    let page_0_cards: Vec<_> = first
+        let mut page = 1u64;
+        loop {
+            let offset = page * BATCH_SIZE;
+            if offset >= limit {
+                break;
+            }
+            match search_category(&agent, cid, offset, BATCH_SIZE) {
+                Ok(r) => {
+                    let cards: Vec<_> = r
                         .items
                         .as_deref()
                         .unwrap_or_default()
                         .iter()
                         .filter_map(|i| i.catalog_card.as_ref())
                         .collect();
-
-                    {
-                        let mut f = writer.lock();
-                        for card in &page_0_cards {
-                            let p = build_product(card, cid);
-                            let _ = writeln!(f, "{}", serde_json::to_string(&p).unwrap());
-                            item_count.fetch_add(1, Ordering::SeqCst);
-                        }
+                    if cards.is_empty() {
+                        break;
                     }
-
-                    let mut page = 1u64;
-                    loop {
-                        let offset = page * BATCH_SIZE;
-                        if offset >= limit {
-                            break;
-                        }
-                        match search_category(&agent, cid, offset, BATCH_SIZE) {
-                            Ok(r) => {
-                                let cards: Vec<_> = r
-                                    .items
-                                    .as_deref()
-                                    .unwrap_or_default()
-                                    .iter()
-                                    .filter_map(|i| i.catalog_card.as_ref())
-                                    .collect();
-                                if cards.is_empty() {
-                                    break;
-                                }
-                                let mut f = writer.lock();
-                                for card in &cards {
-                                    let p = build_product(card, cid);
-                                    let _ = writeln!(f, "{}", serde_json::to_string(&p).unwrap());
-                                    item_count.fetch_add(1, Ordering::SeqCst);
-                                }
-                                page += 1;
-                            }
-                            Err(e) => {
-                                if e.contains("too big query offset") {
-                                    break;
-                                }
-                                eprintln!("[WARN] {ctitle} ({cid}) offset {offset}: {e}");
-                                break;
-                            }
-                        }
+                    for card in &cards {
+                        let p = build_product(card, cid);
+                        let _ = writeln!(writer, "{}", serde_json::to_string(&p).unwrap());
+                        item_count += 1;
                     }
-
-                    {
-                        let mut map = categories.lock();
-                        map.insert(
-                            key,
-                            CategoryProgress {
-                                total: api_total,
-                                offset: (page * BATCH_SIZE).min(limit),
-                            },
-                        );
-                    }
-
-                    let d = done.fetch_add(1, Ordering::SeqCst) + 1;
-                    if d % 50 == 0 || d == total as u64 {
-                        let cnt = item_count.load(Ordering::SeqCst);
-                        let el = start.elapsed();
-                        eprintln!(
-                            "[INFO] {d}/{total} ({ctitle}) — {cnt} items [{}.{:03}s]",
-                            el.as_secs(),
-                            el.subsec_millis()
-                        );
-                        persist(&categories, &item_count);
-                    }
+                    page += 1;
                 }
-            });
+                Err(e) => {
+                    if e.contains("too big query offset") {
+                        break;
+                    }
+                    eprintln!("[WARN] {ctitle} ({cid}) offset {offset}: {e}");
+                    break;
+                }
+            }
         }
-    });
 
-    persist(&categories, &item_count);
+        categories.insert(
+            key,
+            CategoryProgress {
+                total: api_total,
+                offset: (page * BATCH_SIZE).min(limit),
+            },
+        );
 
-    let cnt = item_count.load(Ordering::SeqCst);
+        if d % 50 == 0 || d == total as u64 {
+            let el = start.elapsed();
+            eprintln!(
+                "[INFO] {d}/{total} ({ctitle}) — {item_count} items [{}.{:03}s]",
+                el.as_secs(),
+                el.subsec_millis()
+            );
+            persist(&categories, item_count);
+        }
+    }
+
+    persist(&categories, item_count);
+
     let el = start.elapsed();
     eprintln!(
-        "[INFO] Done: {cnt} items in {}.{:03}s",
+        "[INFO] Done: {item_count} items in {}.{:03}s",
         el.as_secs(),
         el.subsec_millis()
     );
