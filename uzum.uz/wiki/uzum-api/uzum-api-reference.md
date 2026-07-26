@@ -1,8 +1,8 @@
 # Uzum API Reference
 
-> Sources: uzum.uz, 2026-07-25 (live API investigation)
+> Sources: uzum.uz, 2026-07-25 (live API investigation); 2026-07-26 (live run verification)
 > Raw: [API End-to-End Analysis](../../raw/uzum-api/2026-07-25-api-end-to-end-analysis.md)
-> Updated: 2026-07-25
+> Updated: 2026-07-26
 
 ## Overview
 
@@ -151,6 +151,8 @@ ProductCard_Checkout:  buyingOptions { defaultSkuId, isSingleSku, deliveryOption
 ```
 
 Delivery stock types: `FBS` (fulfilled by seller), `FBO` (fulfilled by uzum)
+
+**Note:** `deliveryOptions` is a single `DeliveryOptions` object (`{ shortDate, stockType }`), not an array. The collector previously typed it as `Vec<DeliveryOptions>` which caused deserialization failures.
 
 ### Badge Types
 
