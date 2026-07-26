@@ -1,21 +1,22 @@
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-use parking_lot::Mutex;
 
 pub const GRAPHQL_URL: &str = "https://graphql.uzum.uz/";
 pub const REST_BASE: &str = "https://api.uzum.uz/api";
-pub const USER_AGENT: &str =
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
+pub const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
 pub const BATCH_SIZE: u64 = 100;
 pub const OFFSET_CAP: u64 = 9900;
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+
+// ── API deserialization ──────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 pub struct GqlResponse<T> {
@@ -65,7 +66,6 @@ pub struct ProductCard {
     pub feedback_quantity: Option<u64>,
     pub rating: Option<f64>,
     pub buying_options: Option<BuyingOptions>,
-    pub discount: Option<Discount>,
     pub promo_future_info: Option<PromoFutureInfo>,
     pub badges: Option<Vec<Badge>>,
 }
@@ -77,26 +77,9 @@ pub struct BuyingOptions {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct PriceBlock {
-    pub sell_price: Option<Price>,
-    pub full_price: Option<Price>,
-    pub seller_price: Option<Price>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct Price {
-    pub amount: Option<u64>,
-}
-
-#[derive(Debug, Deserialize)]
 pub struct DeliveryOptions {
     pub short_date: Option<String>,
     pub stock_type: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct Discount {
-    pub discount_price: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -111,13 +94,51 @@ pub struct Badge {
     pub text: Option<String>,
     pub background_color: Option<String>,
     pub text_color: Option<String>,
-    #[serde(rename = "iconLink")]
-    pub icon_link: Option<String>,
-    #[serde(rename = "endDate")]
-    pub end_date: Option<u64>,
-    #[serde(rename = "timerType")]
-    pub timer_type: Option<String>,
 }
+
+// ── Output serialization ─────────────────────────────────────────────
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProductRecord {
+    product_id: u64,
+    title: String,
+    category_id: u64,
+    min_full_price: Option<u64>,
+    min_sell_price: Option<u64>,
+    discount_percent: u64,
+    feedback_quantity: Option<u64>,
+    rating: Option<f64>,
+    is_single_sku: Option<bool>,
+    badges: Vec<BadgeRecord>,
+    promo_future_info: Option<PromoFutureRecord>,
+    delivery_options: Option<DeliveryRecord>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BadgeRecord {
+    id: Option<u64>,
+    text: Option<String>,
+    background_color: Option<String>,
+    text_color: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PromoFutureRecord {
+    min_future_price: Option<u64>,
+    min_future_price_date: Option<u64>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeliveryRecord {
+    short_date: Option<String>,
+    stock_type: Option<String>,
+}
+
+// ── State ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CategoryProgress {
@@ -132,6 +153,8 @@ pub struct StateFile {
     pub item_count: u64,
     pub updated_at: String,
 }
+
+// ── Paths & config ───────────────────────────────────────────────────
 
 pub fn data_root() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
@@ -166,6 +189,8 @@ pub fn build_agent() -> ureq::Agent {
         .build()
         .new_agent()
 }
+
+// ── HTTP helpers ─────────────────────────────────────────────────────
 
 pub fn fetch_category_tree(agent: &ureq::Agent) -> Vec<CategoryNode> {
     let url = format!("{REST_BASE}/main/root-categories");
@@ -264,18 +289,12 @@ pub fn search_category(
                         productId title
                         minFullPrice minSellPrice
                         feedbackQuantity rating
-                        priceBlock {
-                            sellPrice { amount }
-                            fullPrice { amount }
-                            sellerPrice { amount }
-                        }
                         buyingOptions {
                             isSingleSku
                             deliveryOptions { shortDate stockType }
                         }
-                        discount { discountPrice }
                         promoFutureInfo { minFuturePrice minFuturePriceDate }
-                        badges { id text backgroundColor textColor iconLink endDate timerType }
+                        badges { id text backgroundColor textColor }
                     }
                 }
                 total
@@ -300,6 +319,60 @@ pub fn search_category(
         total: None,
     }))
 }
+
+// ── Product mapping ──────────────────────────────────────────────────
+
+fn build_product(card: &ProductCard, cat_id: u64) -> ProductRecord {
+    let full = card.min_full_price.unwrap_or(0);
+    let sell = card.min_sell_price.unwrap_or(0);
+    let discount_percent = if full > 0 && sell < full {
+        ((1.0 - sell as f64 / full as f64) * 100.0).round() as u64
+    } else {
+        0
+    };
+
+    ProductRecord {
+        product_id: card.product_id,
+        title: card.title.clone().unwrap_or_default(),
+        category_id: cat_id,
+        min_full_price: card.min_full_price,
+        min_sell_price: card.min_sell_price,
+        discount_percent,
+        feedback_quantity: card.feedback_quantity,
+        rating: card.rating,
+        is_single_sku: card.buying_options.as_ref().and_then(|bo| bo.is_single_sku),
+        badges: card
+            .badges
+            .as_ref()
+            .map(|bs| {
+                bs.iter()
+                    .filter(|b| b.id.is_some() || b.text.is_some())
+                    .map(|b| BadgeRecord {
+                        id: b.id,
+                        text: b.text.clone(),
+                        background_color: b.background_color.clone(),
+                        text_color: b.text_color.clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        promo_future_info: card.promo_future_info.as_ref().map(|p| PromoFutureRecord {
+            min_future_price: p.min_future_price,
+            min_future_price_date: p.min_future_price_date,
+        }),
+        delivery_options: card
+            .buying_options
+            .as_ref()
+            .and_then(|bo| bo.delivery_options.as_ref())
+            .and_then(|d| d.first())
+            .map(|d| DeliveryRecord {
+                short_date: d.short_date.clone(),
+                stock_type: d.stock_type.clone(),
+            }),
+    }
+}
+
+// ── Time ─────────────────────────────────────────────────────────────
 
 pub fn iso_now() -> String {
     let d = std::time::SystemTime::now()
@@ -326,6 +399,26 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
     let y = if m <= 2 { y + 1 } else { y };
     (y, m, d)
 }
+
+// ── State persistence ────────────────────────────────────────────────
+
+fn persist(categories: &Arc<Mutex<HashMap<String, CategoryProgress>>>, item_count: &AtomicU64) {
+    let map = categories.lock();
+    let state = StateFile {
+        version: 1,
+        categories: map.clone(),
+        item_count: item_count.load(Ordering::SeqCst),
+        updated_at: iso_now(),
+    };
+    drop(map);
+    let tmp = state_file().with_extension("tmp");
+    if let Ok(s) = serde_json::to_string(&state) {
+        let _ = fs::write(&tmp, &s);
+        let _ = fs::rename(&tmp, state_file());
+    }
+}
+
+// ── Main ─────────────────────────────────────────────────────────────
 
 fn main() {
     let is_refresh = std::env::args().any(|a| a == "--refresh");
@@ -411,128 +504,130 @@ fn main() {
             let leaves = leaves.clone();
             let ts = ts.clone();
 
-            s.spawn(move || loop {
-                let i = index.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                if i >= total {
-                    break;
-                }
-                let node = &leaves[i];
-                let cid = node.id;
-                let ctitle = node.title.as_deref().unwrap_or("?");
-                let key = cid.to_string();
+            s.spawn(move || {
+                loop {
+                    let i = index.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if i >= total {
+                        break;
+                    }
+                    let node = &leaves[i];
+                    let cid = node.id;
+                    let ctitle = node.title.as_deref().unwrap_or("?");
+                    let key = cid.to_string();
 
-                if is_refresh {
-                    let map = categories.lock();
-                    if let Some(p) = map.get(&key) {
-                        if p.offset >= OFFSET_CAP || p.offset >= p.total {
+                    if is_refresh {
+                        let map = categories.lock();
+                        if let Some(p) = map.get(&key) {
+                            if p.offset >= OFFSET_CAP || p.offset >= p.total {
+                                done.fetch_add(1, Ordering::SeqCst);
+                                continue;
+                            }
+                        }
+                    }
+
+                    let first = match search_category(&agent, cid, 0, BATCH_SIZE) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            eprintln!("[WARN] {ctitle} ({cid}): {e}");
                             done.fetch_add(1, Ordering::SeqCst);
                             continue;
                         }
-                    }
-                }
+                    };
 
-                let first = match search_category(&agent, cid, 0, BATCH_SIZE) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        eprintln!("[WARN] {ctitle} ({cid}): {e}");
+                    let api_total = first.total.unwrap_or(0);
+                    if api_total == 0 {
                         done.fetch_add(1, Ordering::SeqCst);
                         continue;
                     }
-                };
 
-                let api_total = first.total.unwrap_or(0);
-                if api_total == 0 {
-                    done.fetch_add(1, Ordering::SeqCst);
-                    continue;
-                }
-
-                if is_refresh {
-                    let map = categories.lock();
-                    if let Some(p) = map.get(&key) {
-                        if p.total == api_total && p.offset >= api_total.min(OFFSET_CAP) {
-                            drop(map);
-                            done.fetch_add(1, Ordering::SeqCst);
-                            continue;
+                    if is_refresh {
+                        let map = categories.lock();
+                        if let Some(p) = map.get(&key) {
+                            if p.total == api_total && p.offset >= api_total.min(OFFSET_CAP) {
+                                drop(map);
+                                done.fetch_add(1, Ordering::SeqCst);
+                                continue;
+                            }
                         }
                     }
-                }
 
-                let limit = api_total.min(OFFSET_CAP);
+                    let limit = api_total.min(OFFSET_CAP);
 
-                let page_0_cards: Vec<_> = first
-                    .items
-                    .as_deref()
-                    .unwrap_or_default()
-                    .iter()
-                    .filter_map(|i| i.catalog_card.as_ref())
-                    .collect();
+                    let page_0_cards: Vec<_> = first
+                        .items
+                        .as_deref()
+                        .unwrap_or_default()
+                        .iter()
+                        .filter_map(|i| i.catalog_card.as_ref())
+                        .collect();
 
-                {
-                    let mut f = writer.lock();
-                    for card in &page_0_cards {
-                        let p = build_product(card, ctitle, cid, &ts);
-                        let _ = writeln!(f, "{}", serde_json::to_string(&p).unwrap());
-                        item_count.fetch_add(1, Ordering::SeqCst);
-                    }
-                }
-
-                let mut page = 1u64;
-                loop {
-                    let offset = page * BATCH_SIZE;
-                    if offset >= limit {
-                        break;
-                    }
-                    match search_category(&agent, cid, offset, BATCH_SIZE) {
-                        Ok(r) => {
-                            let cards: Vec<_> = r
-                                .items
-                                .as_deref()
-                                .unwrap_or_default()
-                                .iter()
-                                .filter_map(|i| i.catalog_card.as_ref())
-                                .collect();
-                            if cards.is_empty() {
-                                break;
-                            }
-                            let mut f = writer.lock();
-                            for card in &cards {
-                                let p = build_product(card, ctitle, cid, &ts);
-                                let _ = writeln!(f, "{}", serde_json::to_string(&p).unwrap());
-                                item_count.fetch_add(1, Ordering::SeqCst);
-                            }
-                            page += 1;
+                    {
+                        let mut f = writer.lock();
+                        for card in &page_0_cards {
+                            let p = build_product(card, cid);
+                            let _ = writeln!(f, "{}", serde_json::to_string(&p).unwrap());
+                            item_count.fetch_add(1, Ordering::SeqCst);
                         }
-                        Err(e) => {
-                            if e.contains("too big query offset") {
-                                break;
-                            }
-                            eprintln!("[WARN] {ctitle} ({cid}) offset {offset}: {e}");
+                    }
+
+                    let mut page = 1u64;
+                    loop {
+                        let offset = page * BATCH_SIZE;
+                        if offset >= limit {
                             break;
                         }
+                        match search_category(&agent, cid, offset, BATCH_SIZE) {
+                            Ok(r) => {
+                                let cards: Vec<_> = r
+                                    .items
+                                    .as_deref()
+                                    .unwrap_or_default()
+                                    .iter()
+                                    .filter_map(|i| i.catalog_card.as_ref())
+                                    .collect();
+                                if cards.is_empty() {
+                                    break;
+                                }
+                                let mut f = writer.lock();
+                                for card in &cards {
+                                    let p = build_product(card, cid);
+                                    let _ = writeln!(f, "{}", serde_json::to_string(&p).unwrap());
+                                    item_count.fetch_add(1, Ordering::SeqCst);
+                                }
+                                page += 1;
+                            }
+                            Err(e) => {
+                                if e.contains("too big query offset") {
+                                    break;
+                                }
+                                eprintln!("[WARN] {ctitle} ({cid}) offset {offset}: {e}");
+                                break;
+                            }
+                        }
                     }
-                }
 
-                {
-                    let mut map = categories.lock();
-                    map.insert(
-                        key,
-                        CategoryProgress {
-                            total: api_total,
-                            offset: (page * BATCH_SIZE).min(limit),
-                        },
-                    );
-                }
+                    {
+                        let mut map = categories.lock();
+                        map.insert(
+                            key,
+                            CategoryProgress {
+                                total: api_total,
+                                offset: (page * BATCH_SIZE).min(limit),
+                            },
+                        );
+                    }
 
-                let d = done.fetch_add(1, Ordering::SeqCst) + 1;
-                if d % 50 == 0 || d == total as u64 {
-                    let cnt = item_count.load(Ordering::SeqCst);
-                    let el = start.elapsed();
-                    eprintln!(
-                        "[INFO] {d}/{total} ({ctitle}) — {cnt} items [{}.{:03}s]",
-                        el.as_secs(),
-                        el.subsec_millis()
-                    );
-                    persist(&categories, &item_count);
+                    let d = done.fetch_add(1, Ordering::SeqCst) + 1;
+                    if d % 50 == 0 || d == total as u64 {
+                        let cnt = item_count.load(Ordering::SeqCst);
+                        let el = start.elapsed();
+                        eprintln!(
+                            "[INFO] {d}/{total} ({ctitle}) — {cnt} items [{}.{:03}s]",
+                            el.as_secs(),
+                            el.subsec_millis()
+                        );
+                        persist(&categories, &item_count);
+                    }
                 }
             });
         }
@@ -550,167 +645,77 @@ fn main() {
     eprintln!("[INFO] Output: {}", output_file().display());
 }
 
-fn persist(categories: &Arc<Mutex<HashMap<String, CategoryProgress>>>, item_count: &AtomicU64) {
-    let map = categories.lock();
-    let state = StateFile {
-        version: 1,
-        categories: map.clone(),
-        item_count: item_count.load(Ordering::SeqCst),
-        updated_at: iso_now(),
-    };
-    drop(map);
-    let tmp = state_file().with_extension("tmp");
-    if let Ok(s) = serde_json::to_string(&state) {
-        let _ = fs::write(&tmp, &s);
-        let _ = fs::rename(&tmp, state_file());
-    }
-}
-
-fn build_product(card: &ProductCard, _cat: &str, cat_id: u64, _ts: &str) -> serde_json::Value {
-    let full = card.min_full_price.unwrap_or(0);
-    let sell = card.min_sell_price.unwrap_or(0);
-    let disc = if full > 0 && sell < full {
-        ((1.0 - sell as f64 / full as f64) * 100.0).round() as u64
-    } else {
-        0
-    };
-
-    // priceBlock: nested { sellPrice: { amount }, fullPrice: { amount }, sellerPrice: { amount } }
-    let price_block = serde_json::json!({
-        "sellPrice": { "amount": card.min_sell_price },
-        "fullPrice": { "amount": card.min_full_price },
-        "sellerPrice": { "amount": card.min_sell_price },
-    });
-
-    // isSingleSku from buying_options
-    let is_single_sku = card
-        .buying_options
-        .as_ref()
-        .and_then(|bo| bo.is_single_sku);
-
-    // deliveryOptions: first option's shortDate and stockType
-    let delivery_options: Option<serde_json::Value> = card
-        .buying_options
-        .as_ref()
-        .and_then(|bo| bo.delivery_options.as_ref())
-        .and_then(|d| d.first())
-        .map(|d| {
-            serde_json::json!({
-                "shortDate": d.short_date,
-                "stockType": d.stock_type,
-            })
-        });
-
-    // promoFutureInfo: { minFuturePrice, minFuturePriceDate }
-    let promo_future_info = card.promo_future_info.as_ref().map(|pfi| {
-        serde_json::json!({
-            "minFuturePrice": pfi.min_future_price,
-            "minFuturePriceDate": pfi.min_future_price_date,
-        })
-    });
-
-    // badges: Vec of { id, text, backgroundColor, textColor }, filter out entries with no id AND no text
-    let badges: Vec<serde_json::Value> = card
-        .badges
-        .as_ref()
-        .map(|b| {
-            b.iter()
-                .filter(|b| b.id.is_some() || b.text.is_some())
-                .map(|b| {
-                    serde_json::json!({
-                        "id": b.id,
-                        "text": b.text,
-                        "backgroundColor": b.background_color,
-                        "textColor": b.text_color,
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    serde_json::json!({
-        "productId": card.product_id,
-        "title": card.title.as_deref().unwrap_or(""),
-        "categoryId": cat_id,
-        "minFullPrice": card.min_full_price,
-        "minSellPrice": card.min_sell_price,
-        "priceBlock": price_block,
-        "discountPercent": disc,
-        "feedbackQuantity": card.feedback_quantity,
-        "rating": card.rating,
-        "isSingleSku": is_single_sku,
-        "badges": badges,
-        "promoFutureInfo": promo_future_info,
-        "deliveryOptions": delivery_options,
-    })
-}
+// ── Tests ────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_build_product_discount() {
-        let card = ProductCard {
+    fn card(price_full: Option<u64>, price_sell: Option<u64>) -> ProductCard {
+        ProductCard {
             product_id: 1,
             title: Some("Widget".into()),
-            min_full_price: Some(1000),
-            min_sell_price: Some(700),
+            min_full_price: price_full,
+            min_sell_price: price_sell,
             feedback_quantity: Some(10),
             rating: Some(4.0),
             buying_options: None,
-            discount: None,
             promo_future_info: None,
             badges: None,
-        };
-        let p = build_product(&card, "Test", 99, "2026-07-25T00:00:00.000Z");
-        assert_eq!(p["productId"], 1);
-        assert_eq!(p["minSellPrice"], 700);
-        assert_eq!(p["discountPercent"], 30);
+        }
     }
 
     #[test]
-    fn test_build_product_no_discount() {
-        let card = ProductCard {
+    fn discount_computed() {
+        let p = build_product(&card(Some(1000), Some(700)), 99);
+        assert_eq!(p.product_id, 1);
+        assert_eq!(p.min_sell_price, Some(700));
+        assert_eq!(p.discount_percent, 30);
+    }
+
+    #[test]
+    fn no_discount_when_equal() {
+        let p = build_product(&card(Some(500), Some(500)), 1);
+        assert_eq!(p.discount_percent, 0);
+        assert_eq!(p.rating, Some(4.0));
+    }
+
+    #[test]
+    fn null_fields_stay_null() {
+        let c = ProductCard {
             product_id: 2,
             title: None,
-            min_full_price: Some(500),
-            min_sell_price: Some(500),
+            min_full_price: None,
+            min_sell_price: None,
             feedback_quantity: None,
             rating: None,
             buying_options: None,
-            discount: None,
             promo_future_info: None,
             badges: None,
         };
-        let p = build_product(&card, "T", 1, "2026-07-25T00:00:00.000Z");
-        assert_eq!(p["discountPercent"], 0);
-        assert_eq!(p["rating"], serde_json::Value::Null);
+        let p = build_product(&c, 1);
+        assert_eq!(p.title, "");
+        assert_eq!(p.discount_percent, 0);
+        assert!(p.badges.is_empty());
+        assert!(p.promo_future_info.is_none());
+        assert!(p.delivery_options.is_none());
     }
 
     #[test]
-    fn test_iso_format() {
+    fn serializes_to_camel_case() {
+        let p = build_product(&card(Some(2000), Some(1500)), 2);
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v["productId"], 1);
+        assert_eq!(v["minSellPrice"], 1500);
+        assert_eq!(v["minFullPrice"], 2000);
+        assert_eq!(v["categoryId"], 2);
+        assert!(v.get("priceBlock").is_none());
+    }
+
+    #[test]
+    fn iso_format_sane() {
         let s = iso_now();
         assert!(s.len() > 20);
         assert!(s.ends_with('Z'));
-    }
-
-    #[test]
-    fn test_build_product_price_block() {
-        let card = ProductCard {
-            product_id: 3,
-            title: Some("Gadget".into()),
-            min_full_price: Some(2000),
-            min_sell_price: Some(1500),
-            feedback_quantity: Some(5),
-            rating: Some(4.5),
-            buying_options: None,
-            discount: None,
-            promo_future_info: None,
-            badges: None,
-        };
-        let p = build_product(&card, "G", 2, "2026-07-25T00:00:00.000Z");
-        assert_eq!(p["priceBlock"]["sellPrice"]["amount"], 1500);
-        assert_eq!(p["priceBlock"]["fullPrice"]["amount"], 2000);
     }
 }
