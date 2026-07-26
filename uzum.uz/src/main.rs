@@ -197,11 +197,16 @@ pub fn build_agent() -> ureq::Agent {
 // ── HTTP helpers ─────────────────────────────────────────────────────
 
 pub fn fetch_category_tree(agent: &ureq::Agent) -> Vec<CategoryNode> {
-    let url = format!("{REST_BASE}/main/root-categories");
-    let (token, _) = read_auth();
-    let mut req = agent.get(&url).header("Accept", "application/json");
+    let url = format!("{REST_BASE}/main/root-categories?eco=false");
+    let (token, iid) = read_auth();
+    let mut req = agent
+        .get(&url)
+        .header("Accept", "application/json");
     if let Some(t) = token {
         req = req.header("Authorization", format!("Bearer {t}"));
+    }
+    if let Some(i) = iid {
+        req = req.header("X-Iid", i);
     }
     let resp = match req.call() {
         Ok(r) => r,
@@ -283,8 +288,8 @@ pub fn search_category(
     limit: u64,
 ) -> Result<SearchResult, String> {
     let q = r#"
-        query MakeSearch_ItemsAndFilters($input: MakeSearchQueryInput!) {
-            makeSearch(query: $input) {
+        query MakeSearch_ItemsAndFilters($queryInput: MakeSearchQueryInput!) {
+            makeSearch(query: $queryInput) {
                 items {
                     catalogCard {
                         productId title
@@ -303,14 +308,15 @@ pub fn search_category(
         }
     "#;
     let vars = serde_json::json!({
-        "input": {
-            "categoryId": category_id.to_string(),
+        "queryInput": {
+            "offerCategoryId": category_id.to_string(),
             "showAdultContent": "TRUE",
             "filters": [],
             "sort": "BY_ORDERS_NUMBER_DESC",
             "pagination": { "offset": offset, "limit": limit },
             "correctQuery": false,
             "getFastCategories": false,
+            "getFastFacets": false,
         }
     });
     let data = graphql_request(agent, q, &vars, Some("MakeSearch_ItemsAndFilters"))?;

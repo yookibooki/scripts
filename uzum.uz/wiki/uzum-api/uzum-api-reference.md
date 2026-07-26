@@ -1,6 +1,6 @@
 # Uzum API Reference
 
-> Sources: uzum.uz, 2026-07-25 (live API investigation); 2026-07-26 (live run verification)
+> Sources: uzum.uz, 2026-07-25 (live API investigation); 2026-07-26 (live run & DevTools fact-check)
 > Raw: [API End-to-End Analysis](../../raw/uzum-api/2026-07-25-api-end-to-end-analysis.md)
 > Updated: 2026-07-26
 
@@ -14,8 +14,8 @@ Comprehensive reference of the Uzum.uz marketplace API as observed from live bro
 - **Build**: Build-Number: 884252
 - **Server**: ycalb
 - **CDN**: images.uzum.uz (product images), static.uzum.uz (static assets)
-- **Sentry**: sentry.infra.cluster.daymarket.uz
-- **Analytics**: customer-resources.uzum.uz (events + system/performance)
+- **Sentry**: sentry.infra.cluster.daymarket.uz (`sentry_key=948fdc05a99a018e8d3ab003bee4b5a3`)
+- **Analytics**: customer-resources.uzum.uz (`POST /api/analytics/v2/events`, `POST /api/analytics/v2/system/performance`)
 - **Feature flags**: cdn.growthbook.io/api/features (GrowthBook SDK key: sdk-Ndq9uu11eUCoTda)
 
 ## API Domains
@@ -36,11 +36,12 @@ Comprehensive reference of the Uzum.uz marketplace API as observed from live bro
 - `accept-language: uz-UZ`
 - `sentry-trace` / `baggage` for Sentry distributed tracing
 
-### GraphQL (additional)
+### GraphQL (shared + additional)
+- All REST headers (`Authorization`, `x-iid`, `accept-language`, `sentry-trace`, `baggage`) sent on GraphQL too
 - `apollographql-client-name: web-customers`
 - `apollographql-client-version: 1.63.2` (homepage/category) or `1.34.6` (PDP)
 - `city-id: 1`
-- `city-latitude`, `city-longitude`, `latitude`, `longitude`
+- `city-latitude`, `city-longitude`, `latitude`, `longitude` (on every request, not just PDP)
 - `x-context: null` (PDP only)
 
 ## REST Endpoints
@@ -52,7 +53,7 @@ Comprehensive reference of the Uzum.uz marketplace API as observed from live bro
 
 ### `GET /api/main/promo-categories`
 - Returns promotional category cards: `id`, `title`, `subtitle`, `iconLink`, `deepLink`
-- Response includes `timestamp`
+- Response includes `"timestamp": "2026-07-26T05:52:18.648145364"`
 
 ### `GET /api/popup/active`
 - Parameters: `installId`, `token` (JWT)
@@ -60,6 +61,7 @@ Comprehensive reference of the Uzum.uz marketplace API as observed from live bro
 
 ### `GET /api/user/purchases/preview`
 - Authenticated: user purchase preview
+- Returns `{"payload":{"title":"Xarid qilgansiz","subTitle":"Qaytadan buyurtma qilmoqchi bo‘lsangiz","imageUrls":[...]}}`
 
 ### `GET /api/user/name`
 - Authenticated: user display name
@@ -67,32 +69,40 @@ Comprehensive reference of the Uzum.uz marketplace API as observed from live bro
 ### `GET /api/user/contacts`
 - Authenticated: user contact info
 
+### `POST /api/main/cities/city-by-location`
+- Geo-location endpoint called on page load
+
 ## GraphQL Endpoint
 
-Single endpoint: `POST https://graphql.uzum.uz/`
+Single endpoint: `POST https://graphql.um.uz/`
 
 ### Homepage Queries
 
 **Cart_Summary** — `query Cart_Summary { cart { ...CartSummaryFragment } }`
 - Cart state with `amount`, `sku` (id, availableAmount, product id)
+- Response shape: `{"data":{"cart":[]}}` (empty array when no items)
 
 **getMainContent** — `query getMainContent($type: DisplayType!, $page: Int!, $size: Int!, $offerSize: Int!, $offset: Int!, $rowWidth: Int!)`
 - Complex homepage: banners, promo blocks, carousels, today's deals
-- Fragment types: BannerBlock, PromoImageBlock, ExtendableOffer, ImageOffer, CarouselOffer, StyledCarouselOffer, TodayDealsCarouselOffer, PageableVerticalOfferBlock, InlineBanner, BannerGrid
+- Variables: `{"type":"DESKTOP","page":0,"size":10,"offerSize":10,"offset":0,"rowWidth":5}`
+- Fragment types: BannerBlock (sub-type TopBanner), PromoImageBlock, ExtendableOffer, ImageOffer, CarouselOffer, StyledCarouselOffer, TodayDealsCarouselOffer, PageableVerticalOfferBlock, InlineBanner, BannerGrid
+- ProductCard fragments include full `PriceBlock` with `badges`, `sellPrice`, `finalPrice`, `fullPrice`, `sellerPrice`, `icon`
 
 **FetchReviewForModal** — `query FetchReviewForModal { reviewModal { ... } }`
 - Pending review modal data
+- Response shape: `{"data":{"reviewModal":[]}}` (empty array when nothing pending)
 
 ### Category Page Queries
 
 **MakeSearch_ItemsAndFilters** — `query MakeSearch_ItemsAndFilters($queryInput: MakeSearchQueryInput!)`
 - Product search with pagination, facets, fast categories, banners
-- Returns: `items` (ProductCardFragment), `facets`, `fastFacets`, `fastCategories`, `total`, `category`, `bannersV2`, `todayDealOfferSelectors`, `permanentLinkSeo`, `token`
+- Returns: `items` (each with `catalogCard` + `cpoAdvVersion`/`cpoId`/`bidId`), `facets`, `fastFacets`, `fastCategories`, `total`, `category`, `bannersV2`, `todayDealOfferSelectors`, `permanentLinkSeo`, `token`, `queryText`, `mayHaveAdultContent`, `categoryFullMatch`, `offerCategory`, `correctedQueryText`, `categoryWasPredicted`
 
-Variables:
+Input variable is `$queryInput`, whose fields are:
+
 ```json
 {
-  "categoryId": "10068",
+  "offerCategoryId": "10068",
   "showAdultContent": "TRUE",
   "filters": [],
   "sort": "BY_RELEVANCE_DESC",
@@ -107,11 +117,20 @@ Variables:
 }
 ```
 
+Key differences from earlier assumptions:
+- **Variable name**: `$queryInput` (not `$input`) — top-level variable is `$queryInput: MakeSearchQueryInput!`
+- **Field name**: `offerCategoryId` (not `categoryId`)
+- **`getFastCategories` is `true`** in all observed calls
+- **`limit: 48`** for category page, but the scraper uses `limit: 100` (works but bypasses UI convention)
+
 Sort modes: `BY_RELEVANCE_DESC`, `BY_ORDERS_NUMBER_DESC`
 
 **MakeSearch_Categories** — `query MakeSearch_Categories($queryInput: MakeSearchQueryInput!)`
 - `makeSearch { categoryTree { category { ...CategoryFragment } total } }`
 - Returns subcategory tree with product counts for the sidebar
+
+**MakeSearch_ItemsAndFilters (facets-only)** — same query with `pagination: { offset: 0, limit: 0 }`
+- Returns `items: []` but full facets/fastCategories — effectively "metadata-only" mode
 
 ### Product Detail Page Queries
 
@@ -137,22 +156,50 @@ Sort modes: `BY_RELEVANCE_DESC`, `BY_ORDERS_NUMBER_DESC`
 **addViewedProduct** — `mutation addViewedProduct($id: Int!) { addRecentlyViewedProduct(id: $id) }`
 - Track product page view
 
-## ProductCardFragment
+## CatalogCard (Product Card)
 
-Shared fragment across all GraphQL queries. Five sub-fragments:
+`CatalogCard` is the GraphQL union type for product cards. It can be:
+- **`ProductCard`** — single-SKU product with fields: `carrierCode`, `cpoId`, `cpoVersion`
+- **`SkuGroupCard`** — multi-variant product with `characteristicValues` — MORE COMMON in search results
+
+Shared fragments (all on `CatalogCard`):
 
 ```graphql
 ProductCard_Identity:  id, productId, title, adult
 ProductCard_Commerce:  buyingOptions { isBestPrice, priceBlock { badges, sellPrice, finalPrice, fullPrice, sellerPrice, icon } }, discount { discountPrice }, minFullPrice, minSellPrice, promoFutureInfo { minFuturePrice, minFuturePriceDate }, carrierCode
-ProductCard_Marketing: badges [], offer { due, icon }, infoLabel { color, title }
-ProductCard_Media:     photos { key, link { high, low } }
+ProductCard_Marketing:  badges [], offer { due, icon }, infoLabel { color, title }
+ProductCard_Media:     photos { key, link(trans: PRODUCT_540) { high, low } }
 ProductCard_Social:    feedbackQuantity, rating
 ProductCard_Checkout:  buyingOptions { defaultSkuId, isSingleSku, deliveryOptions { shortDate, stockType } }, characteristicValues
 ```
 
-Delivery stock types: `FBS` (fulfilled by seller), `FBO` (fulfilled by uzum)
+**Important**: `carrierCode` appears on both `ProductCard` and `SkuGroupCard` via inline fragments in `ProductCard_Commerce`. `cpoId`/`cpoVersion` only on `ProductCard`. `characteristicValues` only on `SkuGroupCard`.
 
-**Note:** `deliveryOptions` is a single `DeliveryOptions` object (`{ shortDate, stockType }`), not an array. The collector previously typed it as `Vec<DeliveryOptions>` which caused deserialization failures.
+### PriceBlock
+
+```graphql
+fragment PriceBlockFragment on PriceBlock {
+  badges {
+    id text textColor backgroundColor
+    ... on StickerBadge { iconLink }
+    ... on FomoTimerBadge { endDate timerType }
+  }
+  sellPrice { ...priceFragment }
+  finalPrice { ...priceFragment }
+  fullPrice { ...priceFragment }
+  sellerPrice { ...priceFragment }
+  icon
+}
+fragment priceFragment on Price {
+  amountColor amount description descriptionColor
+}
+```
+
+### Delivery
+
+Delivery stock types observed: `FBS` (fulfilled by seller), `FBO` (fulfilled by Uzum)
+
+**`deliveryOptions` is a single object** (`{ shortDate, stockType }`), not an array.
 
 ### Badge Types
 
@@ -160,8 +207,9 @@ Delivery stock types: `FBS` (fulfilled by seller), `FBO` (fulfilled by uzum)
 |------|-----|---------|
 | BottomTextBadge | 424 | "ARZON NARX KAFOLATI" (low price guarantee) |
 | UzumInstallmentTitleBadge | 41 | Installment monthly payment text |
-| StickerBadge | 468 | "Aksiya" (promotion) with icon |
-| FomoTimerBadge | 469 | "Aksiya" with countdown timer |
+| StickerBadge | 468 | "Aksiya" (promotion) with iconLink |
+| FomoTimerBadge | 469 | "Aksiya" with countdown timer (`endDate`, `timerType`) |
+| BottomIconTextBadge | 421 | "ORIGINAL" badge with iconLink |
 
 ## Image Transformations
 
@@ -169,25 +217,34 @@ Base URL: `https://images.uzum.uz/<key>/`
 
 | Suffix | Purpose |
 |--------|---------|
-| `t_product_540_high.jpg` / `_low.jpg` | Product card (540px) |
-| `t_product_720_high.jpg` / `_low.jpg` | Larger product view |
-| `feedback_40.jpg` | Feedback/ review images |
+| `t_product_540_high.jpg` / `_low.jpg` | Product card (540px) — standard search result |
+| `t_product_80_high.jpg` | Purchase preview thumbnail |
+| `t_product_720_high.jpg` / `_low.jpg` | Larger product view (not confirmed) |
+| `feedback_40.jpg` | Feedback/review images |
 | `main_page_banner.jpg` | Homepage banners |
+
+**Note**: Products use `link(trans: PRODUCT_540)` in GraphQL, which maps to `t_product_540_high.jpg`.
 
 ## Response Security Headers
 
-- `access-control-allow-origin: https://uzum.um`
+- `access-control-allow-origin: *` (GraphQL) or `access-control-allow-origin: https://uzum.uz` (REST, also allows cookies)
+- `access-control-allow-credentials: true` (REST only)
+- `access-control-allow-headers: ...` extensive allowlist (REST)
 - `strict-transport-security: max-age=31536000 ; includeSubDomains`
 - `x-content-type-options: nosniff`
 - `x-frame-options: DENY`
-- `x-xss-protection: 0`
+- `x-xss-protection: 1; mode=block` (REST) or `0` (GraphQL)
 - `set-cookie: _yasc=...` (session, SameSite=None, Secure, domain=.api.uzum.uz or .graphql.uzum.uz)
+- `build-info: Build-Number: 884252; Commit:` (REST)
 
 ## Observations
 
 - Single GraphQL endpoint for all queries — no batching per page load
-- Category page limit is 48 (vs collector's 100 batch size)
-- PDP uses older client version 1.34.6 vs 1.63.2 for other pages
+- Category page UI limit is 48 items, but the GraphQL API accepts `limit: 100` (and even `limit: 0` for metadata-only)
+- PDP uses older client version `1.34.6` vs `1.63.2` for other pages
 - `x-context: null` only on PDP requests
 - `root-categories` called on every page navigation
+- `city-by-location` called on every page load
+- `sentry-trace` / `baggage` headers sent on both REST and GraphQL requests
 - No single product detail query — split into GetTabs, ProductPage, Feedbacks, RecommendationBlocks
+- `access-control-allow-origin: *` on GraphQL (not restricted to uzum.uz)
