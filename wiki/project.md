@@ -1,7 +1,7 @@
 # Project Overview — Classifieds Archive Collectors
 
 > Sources: PURPOSE.md, 2026-07-27; AGENTS.md, 2026-07-27; olx.uz WIKI, 2026-07-27; olx.uz README, 2026-07-27; olx.uz AGENTS, 2026-07-27; olx.uz live API investigation, 2026-07-27; birbir.uz WIKI, 2026-07-27; birbir.uz README, 2026-07-27; birbir.uz AGENTS, 2026-07-27; birbir-findings, 2026-07-27; birbir.uz live API investigation, 2026-07-27; uzum.uz WIKI, 2026-07-27; uzum.uz AGENTS, 2026-07-27; uzum.uz API end-to-end analysis, 2026-07-25; uzum.uz live API investigation, 2026-07-25; uzum.uz live page snapshot, 2026-07-25; idlewatch, 2026-07-27
-> Raw: [PURPOSE.md](../../PURPOSE.md); [AGENTS.md](../../AGENTS.md); [olx.uz_WIKI.md](../../raw/collectors/olx.uz_WIKI.md); [olx.uz_README.md](../../raw/collectors/olx.uz_README.md); [olx.uz_AGENTS.md](../../raw/collectors/olx.uz_AGENTS.md); [olx-live-api.md](../../olx.uz/raw/olx-api/2026-07-27-live-api-investigation.md); [birbir.uz_WIKI.md](../../raw/collectors/birbir.uz_WIKI.md); [birbir.uz_README.md](../../raw/collectors/birbir.uz_README.md); [birbir.uz_AGENTS.md](../../raw/collectors/birbir.uz_AGENTS.md); [birbir-findings.md](../../raw/collectors/birbir-findings.md); [birbir-live-api.md](../../birbir.uz/raw/birbir-api/2026-07-27-live-api-investigation.md); [uzum.uz_WIKI.md](../../raw/collectors/uzum.uz_WIKI.md); [uzum.uz_AGENTS.md](../../raw/collectors/uzum.uz_AGENTS.md); [uzum-e2e-analysis.md](../../uzum.uz/raw/uzum-api/2026-07-25-api-end-to-end-analysis.md); [uzum-live-api.md](../../uzum.uz/raw/uzum-api/2026-07-25-live-api-investigation.md); [uzum-page-snapshot.txt](../../uzum.uz/raw/uzum-api/2026-07-25-live-page-snapshot.txt); [idlewatch.md](../../raw/collectors/2026-07-27-idlewatch.md)
+> Raw: [Purpose](../../raw/collectors/2026-07-27-purpose.md); [Dev Principles](../../raw/collectors/2026-07-27-agents.md); [OLX.uz WIKI](../../raw/collectors/2026-07-27-olx-wiki.md); [OLX.uz README](../../raw/collectors/2026-07-27-olx-readme.md); [OLX.uz AGENTS](../../raw/collectors/2026-07-27-olx-agents.md); [OLX.uz live API](../../raw/collectors/2026-07-27-olx-wiki.md); [BirBir.uz WIKI](../../raw/collectors/2026-07-27-birbir-wiki.md); [BirBir.uz README](../../raw/collectors/2026-07-27-birbir-readme.md); [BirBir.uz AGENTS](../../raw/collectors/2026-07-27-birbir-agents.md); [BirBir findings](../../raw/collectors/2026-07-27-birbir-findings.md); [BirBir.uz live API](../../raw/collectors/2026-07-27-birbir-wiki.md); [Uzum.uz WIKI](../../raw/collectors/2026-07-27-uzum-wiki.md); [Uzum.uz AGENTS](../../raw/collectors/2026-07-27-uzum-agents.md); [Uzum e2e analysis](../../raw/collectors/2026-07-27-uzum-wiki.md); [Uzum live API](../../raw/collectors/2026-07-27-uzum-wiki.md); [Uzum page snapshot](../../raw/collectors/2026-07-27-uzum-wiki.md); [idlewatch](../../raw/collectors/linux-idlewatch.sh)
 > Updated: 2026-07-27
 
 ## Purpose
@@ -24,7 +24,7 @@ Uzbekistan's largest classifieds marketplace. Public API — no authentication r
 - **Collector**: `olx-watch` — single `src/main.rs`, two-phase (full sync → incremental poll)
 
 Sources: olx.uz WIKI, 2026-07-27; olx.uz README, 2026-07-27; olx.uz AGENTS, 2026-07-27; olx.uz live API investigation, 2026-07-27
-Raw: [olx.uz_WIKI.md](../../raw/collectors/olx.uz_WIKI.md); [olx.uz_README.md](../../raw/collectors/olx.uz_README.md); [olx.uz_AGENTS.md](../../raw/collectors/olx.uz_AGENTS.md); [olx-live-api.md](../../olx.uz/raw/olx-api/2026-07-27-live-api-investigation.md)
+Raw: [OLX.uz WIKI](../../raw/collectors/2026-07-27-olx-wiki.md); [OLX.uz README](../../raw/collectors/2026-07-27-olx-readme.md); [OLX.uz AGENTS](../../raw/collectors/2026-07-27-olx-agents.md); [OLX.uz live API](../../raw/collectors/2026-07-27-olx-wiki.md)
 
 ### BirBir.uz
 
@@ -39,7 +39,7 @@ Uzbekistan-based classifieds marketplace with a Cloudflare JS challenge gating J
 - **Token refresh**: cached `token.txt` → direct `curl` to site → parse `Set-Cookie`
 
 Sources: birbir.uz WIKI, 2026-07-27; birbir.uz README, 2026-07-27; birbir.uz AGENTS, 2026-07-27; birbir-findings, 2026-07-27; birbir.uz live API investigation, 2026-07-27
-Raw: [birbir.uz_WIKI.md](../../raw/collectors/birbir.uz_WIKI.md); [birbir.uz_README.md](../../raw/collectors/birbir.uz_README.md); [birbir.uz_AGENTS.md](../../raw/collectors/birbir.uz_AGENTS.md); [birbir-findings.md](../../raw/collectors/birbir-findings.md); [birbir-live-api.md](../../birbir.uz/raw/birbir-api/2026-07-27-live-api-investigation.md)
+Raw: [BirBir.uz WIKI](../../raw/collectors/2026-07-27-birbir-wiki.md); [BirBir.uz README](../../raw/collectors/2026-07-27-birbir-readme.md); [BirBir.uz AGENTS](../../raw/collectors/2026-07-27-birbir-agents.md); [BirBir findings](../../raw/collectors/2026-07-27-birbir-findings.md); [BirBir.uz live API](../../raw/collectors/2026-07-27-birbir-wiki.md)
 
 ### Uzum.uz
 
@@ -55,11 +55,11 @@ Uzbekistan's largest online supermarket. GraphQL-based API (Apollo) with REST en
 - **Category tree**: 23 top-level, 1627 leaf categories
 
 Sources: uzum.uz WIKI, 2026-07-27; uzum.uz AGENTS, 2026-07-27; uzum.uz API end-to-end analysis, 2026-07-25; uzum.uz live API investigation, 2026-07-25; uzum.uz live page snapshot, 2026-07-25
-Raw: [uzum.uz_WIKI.md](../../raw/collectors/uzum.uz_WIKI.md); [uzum.uz_AGENTS.md](../../raw/collectors/uzum.uz_AGENTS.md); [uzum-e2e-analysis.md](../../uzum.uz/raw/uzum-api/2026-07-25-api-end-to-end-analysis.md); [uzum-live-api.md](../../uzum.uz/raw/uzum-api/2026-07-25-live-api-investigation.md); [uzum-page-snapshot.txt](../../uzum.uz/raw/uzum-api/2026-07-25-live-page-snapshot.txt)
+Raw: [Uzum.uz WIKI](../../raw/collectors/2026-07-27-uzum-wiki.md); [Uzum.uz AGENTS](../../raw/collectors/2026-07-27-uzum-agents.md); [Uzum e2e analysis](../../raw/collectors/2026-07-27-uzum-wiki.md); [Uzum live API](../../raw/collectors/2026-07-27-uzum-wiki.md); [Uzum page snapshot](../../raw/collectors/2026-07-27-uzum-wiki.md)
 
 ## Idle Monitor
 
-`idlewatch` — a standalone bash script that monitors X11 idle time via `xprintidle` and enforces screen-off + break scheduling:
+`idlewatch` — a standalone bash script that monitors X11 idle time via `xprintidle` and enforces screen-off + break scheduling: See [tools/idlewatch.md](tools/idlewatch.md) for full details.
 
 - **Screen off**: after 2 minutes of inactivity
 - **Short break**: 30 seconds after 20 minutes of active work
@@ -68,7 +68,7 @@ Raw: [uzum.uz_WIKI.md](../../raw/collectors/uzum.uz_WIKI.md); [uzum.uz_AGENTS.md
 - **Lock**: `flock` on `$LOCK_FILE` for single-instance execution
 
 Sources: idlewatch, 2026-07-27
-Raw: [idlewatch.md](../../raw/collectors/2026-07-27-idlewatch.md)
+Raw: [idlewatch](../../raw/collectors/linux-idlewatch.sh)
 
 ## Common Patterns
 
