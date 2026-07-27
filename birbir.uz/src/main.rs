@@ -377,54 +377,6 @@ fn fetch_page(
     (vec![], false)
 }
 
-// ── Offer processing ───────────────────────────────────────────────
-
-fn trim_offer(offer: &serde_json::Value) -> String {
-    use serde_json::map::Map;
-    let mut r = Map::new();
-    for key in &[
-        "id",
-        "title",
-        "price",
-        "publishedAt",
-        "webUri",
-        "urgentSale",
-        "courierDelivery",
-        "business",
-        "agency",
-        "closed",
-    ] {
-        if let Some(v) = offer.get(*key) {
-            r.insert(key.to_string(), v.clone());
-        }
-    }
-    if let Some(region) = offer.get("region") {
-        if let Some(tp) = region.get("titlePath") {
-            r.insert("titlePath".to_string(), tp.clone());
-        }
-        if let Some(loc) = region.get("location") {
-            if let Some(coords) = loc.get("coordinates") {
-                r.insert("coordinates".to_string(), coords.clone());
-            }
-        }
-    }
-    if let Some(seller) = offer.get("seller") {
-        for (flat, src) in &[
-            ("seller_uuid", "uuid"),
-            ("seller_name", "name"),
-            ("seller_verified", "verified"),
-            ("seller_business", "business"),
-            ("seller_agency", "agency"),
-            ("seller_offerActiveCount", "offerActiveCount"),
-        ] {
-            if let Some(v) = seller.get(*src) {
-                r.insert(flat.to_string(), v.clone());
-            }
-        }
-    }
-    serde_json::to_string(&serde_json::Value::Object(r)).unwrap()
-}
-
 // ── Phases ─────────────────────────────────────────────────────────
 
 fn phase1_initial_collection(agent: &ureq::Agent, state: &mut State) {
@@ -443,7 +395,7 @@ fn phase1_initial_collection(agent: &ureq::Agent, state: &mut State) {
                 continue;
             };
             state.max_id = state.max_id.max(oid);
-            write_record(&mut out_file, &trim_offer(offer));
+            write_record(&mut out_file, &serde_json::to_string(offer).unwrap());
         }
         flush_output(&mut out_file);
         if !has_more {
@@ -475,7 +427,7 @@ fn phase2_poll_new(agent: &ureq::Agent, state: &mut State) -> u32 {
             continue;
         }
         cycle_max = cycle_max.max(oid);
-        write_record(&mut out_file, &trim_offer(offer));
+        write_record(&mut out_file, &serde_json::to_string(offer).unwrap());
         new_count += 1;
     }
     if new_count > 0 {

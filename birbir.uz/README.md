@@ -89,7 +89,7 @@ Example output (abbreviated):
 }
 ```
 
-**Important**: The output is the raw API response — it is NOT flattened. Category path is `region.titlePath[]`, seller info is in the nested `seller` object, coordinates are in `region.location.coordinates`. Prepend `https://birbir.uz/` to `webUri` for the full URL. See `wiki/birbir-api/birbir-api-reference.md` for the full schema.
+**Important**: The output is the raw API response — it is NOT flattened. Category path is `region.titlePath[]`, seller info is in the nested `seller` object, coordinates are in `region.location.coordinates`. Prepend `https://birbir.uz/` to `webUri` for the full URL. See `WIKI.md` for the full schema.
 
 ## Files
 

@@ -29,7 +29,7 @@ Example output (abbreviated):
 }
 ```
 
-**Important**: The output is the raw API response — it is NOT flattened. Price is inside `params[]`, category is a nested object, location is nested. See `wiki/olx-api/olx-api-reference.md` for the full schema.
+**Important**: The output is the raw API response — it is NOT flattened. Price is inside `params[]`, category is a nested object, location is nested. See `WIKI.md` for the full schema.
 
 ## Quick start
 
