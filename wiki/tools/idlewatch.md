@@ -1,7 +1,7 @@
 # idlewatch — X11 Idle Monitor and Break Timer
 
 > Sources: linux/idlewatch, 2026-07-27
-> Raw: [linux/idlewatch](../../raw/collectors/linux-idlewatch.sh)
+> Raw: [linux/idlewatch](../raw/collectors/linux-idlewatch.sh)
 > Updated: 2026-07-27
 
 ## Overview
