@@ -141,8 +141,8 @@ pub fn extract_token() -> Option<String> {
     // Fallback: try cached token first (fastest path)
     if let Some(token) = read_cached_token() {
         if is_token_expired(&token) {
-            eprintln!("[INFO] Cached token expired, re-fetching...");
-            invalidate_cached_token();
+            eprintln!("[INFO] Cached token expired, will re-fetch...");
+            // keep stale file until `cache_token()` overwrites it atomically
         } else {
             eprintln!("[INFO] Using cached auth token ({} chars)", token.len());
             return Some(token);
@@ -176,6 +176,10 @@ pub fn extract_token() -> Option<String> {
         cache_token(&token);
         return Some(token);
     }
+    if let Some(stale) = read_cached_token() {
+        eprintln!("[WARN] Token fetch unavailable; reusing stale cache as degraded path");
+        return Some(stale);
+    }
     None
 }
 
@@ -197,6 +201,32 @@ fn parse_cookie_json(json_str: &str) -> Option<String> {
                 }
             }
         }
+    }
+    None
+}
+
+// Pure, unit-testable header scanner. Parses `Set-Cookie: session=...` headers
+// and converts the first matching `session` value into an access token.
+fn scan_headers_for_token(headers: &str) -> Option<String> {
+    for line in headers.lines() {
+        let lower = line.to_ascii_lowercase().trim().to_string();
+        if !lower.starts_with("set-cookie:") {
+            continue;
+        }
+        let rest = line
+            .trim_start_matches(|c: char| c != ':')
+            .trim_start_matches(':')
+            .trim();
+        let Some(cookie_val) = rest.strip_prefix("session=") else {
+            continue;
+        };
+        let end = cookie_val.find(';').unwrap_or(cookie_val.len());
+        let val = &cookie_val[..end];
+        if !val.starts_with("j%") && !val.starts_with("j:") {
+            continue;
+        }
+        let decoded = url_decode(val);
+        return parse_session_token(&decoded);
     }
     None
 }
@@ -229,25 +259,8 @@ fn direct_token_fetch() -> Option<String> {
             .output()
             .ok()?;
         let headers = String::from_utf8_lossy(&output.stdout);
-
-        for line in headers.lines() {
-            let lower = line.to_ascii_lowercase().trim().to_string();
-            if lower.starts_with("set-cookie:") {
-                let rest = line
-                    .trim_start_matches(|c: char| c != ':')
-                    .trim_start_matches(':')
-                    .trim();
-                if let Some(cookie_val) = rest.strip_prefix("session=") {
-                    let end = cookie_val.find(';').unwrap_or(cookie_val.len());
-                    let val = &cookie_val[..end];
-                    if val.starts_with("j%3A") || val.starts_with("j:") {
-                        let decoded = url_decode(val);
-                        if let Some(token) = parse_session_token(&decoded) {
-                            return Some(token);
-                        }
-                    }
-                }
-            }
+        if let Some(token) = scan_headers_for_token(&headers) {
+            return Some(token);
         }
     }
     None
@@ -656,7 +669,56 @@ mod tests {
         let result = serde_json::from_str::<State>("{broken json}");
         assert!(result.is_err());
     }
+
+    // Concern 2: header-seam is now unit-testable without network.
+
+    #[test]
+    fn test_scan_headers_no_cookie() {
+        let headers = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n";
+        assert!(scan_headers_for_token(headers).is_none());
+    }
+
+    #[test]
+    fn test_scan_headers_cloudflare_challenge() {
+        let html = "<title>Just a moment...</title>";
+        let headers = format!("HTTP/1.1 503 Service Unavailable\r\nContent-Length: {}\r\n\r\n{}", html.len(), html);
+        assert!(scan_headers_for_token(&headers).is_none());
+    }
+
+    #[test]
+    fn test_scan_headers_malformed_session_cookie() {
+        let headers = "HTTP/1.1 200 OK\r\nSet-Cookie: session=not-a-j-cookie; Path=/\r\n\r\n";
+        assert!(scan_headers_for_token(headers).is_none());
+    }
+
+    #[test]
+    fn test_scan_headers_empty_session_value() {
+        let headers = "HTTP/1.1 200 OK\r\nSet-Cookie: session=; Path=/\r\n\r\n";
+        assert!(scan_headers_for_token(headers).is_none());
+    }
+
+    #[test]
+    fn test_scan_headers_valid_session_cookie() {
+        let payload = r#"{"accessToken":"abc123","refreshToken":"xyz"}"#;
+        let encoded = format!("j%3A{}", url_encode(payload));
+        let headers = format!(
+            "HTTP/1.1 200 OK\r\nSet-Cookie: session={}; Path=/\r\n\r\n",
+            encoded
+        );
+        assert_eq!(scan_headers_for_token(&headers), Some("abc123".to_string()));
+    }
+
+    fn url_encode(s: &str) -> String {
+        s.chars()
+            .map(|c| match c {
+                'A'..='Z' | 'a'..='z' | '0'..='9' => c.to_string(),
+                ' ' => "%20".to_string(),
+                _ => format!("%{:02X}", c as u8),
+            })
+            .collect()
+    }
 }
+
 
 fn write_record(out_file: &mut fs::File, line: &str) {
     if let Err(e) = writeln!(out_file, "{line}") {
