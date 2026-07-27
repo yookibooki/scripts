@@ -1,1 +1,3 @@
-The goal is to continuously archive the complete Marketplaces listings and feed it into an AI agentic system for trading analysis
+Continuously archive classifieds and marketplace listings from BirBir.uz, OLX.uz, and Uzum.uz into lossless JSONL exports. The resulting dataset feeds downstream AI-driven trading analysis, market intelligence, and trend modeling.
+
+Each collector is a lean Rust binary that performs an initial full catalog sync, then polls incrementally — writing raw API JSON pass-through with zero transformation. State is persisted locally for idempotent incremental runs.
