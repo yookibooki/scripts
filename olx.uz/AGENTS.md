@@ -11,47 +11,40 @@ cargo build --release
 ```
 
 ## Structure
-* `src/main.rs` — collection logic.
-* `src/lib.rs` — HTTP, parsing, models, helpers.
+* `src/main.rs` — collection logic (single file, no lib.rs).
 
 ## Collection
 ### Phase 1: Full Sync
 * Triggered when `initial_complete=false`.
-* Discover categories via BFS.
-* Paginate each category separately to bypass OLX's 1000-offset limit.
-* Export all unique listings.
-* Save:
-
-  * `max_id`
-  * `initial_complete=true`
-  * `known_categories`
+* Fetch default (uncategorized) listing feed, discover category IDs from `category.id`.
+* BFS over discovered categories, paginating each independently.
+* Export all unique listings as raw API JSON (pass-through, no transformation).
+* Save: `max_id`, `initial_complete=true`, `known_categories`.
 
 ### Phase 2: Incremental Sync
-* Poll newest-first listing feed.
+* Poll newest-first listing feed (`created_at:desc`).
 * Export listings with `id > max_id`.
 * Stop when an entire page contains only known listings.
 * Append only; never delete data.
+
+## API
+- **Endpoint**: `GET https://www.olx.uz/api/v1/offers`
+- **Auth**: None (public endpoint)
+- **Pagination**: offset/limit. API returns ~65 items per page (limit is advisory). No hard offset cap observed.
+- **Page size**: 50 (set in code, actual returned count ~65)
+- **Sort**: `created_at:desc` (newest first)
 
 ## Storage
 Directory: `~/.local/share/olx/`
 
 Files:
-
 * `state.json` → `{ max_id, initial_complete, known_categories }`
-* `olx_export.jsonl` → collected listings
+* `olx_export.jsonl` → raw API offer JSON, one per line (pass-through)
 
-## Export Schema
-Listing:
-`id,url,title,business,created_time,last_refresh_time`
-
-Derived:
-`price_uzs,category_type`
-
-Location:
-`location_city,location_district,location_region,coordinates`
+## Output
+Raw API offer JSON, one per line. Each line is the complete offer object as returned by the OLX API — no flattening or transformation.
 
 ## State Schema
-
 ```json
 {
   "version": 1,
@@ -61,10 +54,7 @@ Location:
 }
 ```
 
-Missing `version` field is treated as version 1.
-
 ## Operational Invariants
-
 * Export file is append-only.
 * `max_id` must never decrease.
 * State writes are atomic (write to `.tmp`, then `rename`).

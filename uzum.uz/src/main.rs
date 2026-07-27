@@ -5,203 +5,114 @@ use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-pub const GRAPHQL_URL: &str = "https://graphql.uzum.uz/";
-pub const REST_BASE: &str = "https://api.uzum.uz/api";
-pub const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
-pub const BATCH_SIZE: u64 = 100;
-pub const OFFSET_CAP: u64 = 9900;
-pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const GRAPHQL_URL: &str = "https://graphql.uzum.uz/";
+const REST_BASE: &str = "https://api.uzum.uz/api";
+const USER_AGENT: &str =
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
+const BATCH_SIZE: u64 = 100;
+const OFFSET_CAP: u64 = 9900;
 
-// ── API deserialization ──────────────────────────────────────────────
+// ── HTTP helpers (local — uzum needs unique timeouts + config) ──────
+
+fn build_agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .user_agent(USER_AGENT)
+        .http_status_as_error(false)
+        .timeout_connect(Some(Duration::from_secs(15)))
+        .timeout_global(Some(Duration::from_secs(30)))
+        .build()
+        .new_agent()
+}
+
+// ── API deserialization ─────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
-pub struct GqlResponse<T> {
-    pub data: Option<T>,
-    pub errors: Option<Vec<GqlError>>,
+struct GqlResponse<T> {
+    data: Option<T>,
+    errors: Option<Vec<GqlError>>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct GqlError {
-    pub message: String,
+struct GqlError {
+    message: String,
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct CategoryNode {
-    pub id: u64,
-    pub title: Option<String>,
-    pub children: Option<Vec<CategoryNode>>,
+#[serde(rename_all = "camelCase")]
+struct CategoryNode {
+    id: u64,
+    title: Option<String>,
+    children: Option<Vec<CategoryNode>>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct CategoriesResponse {
-    pub payload: Option<Vec<CategoryNode>>,
+struct CategoriesResponse {
+    payload: Option<Vec<CategoryNode>>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MakeSearchData {
-    pub make_search: Option<SearchResult>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct SearchResult {
-    pub items: Option<Vec<SearchItem>>,
-    pub total: Option<u64>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct SearchItem {
-    #[serde(rename = "catalogCard")]
-    pub catalog_card: Option<ProductCard>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProductCard {
-    pub product_id: u64,
-    pub title: Option<String>,
-    pub min_full_price: Option<u64>,
-    pub min_sell_price: Option<u64>,
-    pub feedback_quantity: Option<u64>,
-    pub rating: Option<f64>,
-    pub buying_options: Option<BuyingOptions>,
-    pub promo_future_info: Option<PromoFutureInfo>,
-    pub badges: Option<Vec<Badge>>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BuyingOptions {
-    pub is_single_sku: Option<bool>,
-    pub delivery_options: Option<DeliveryOptions>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DeliveryOptions {
-    pub short_date: Option<String>,
-    pub stock_type: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PromoFutureInfo {
-    pub min_future_price: Option<u64>,
-    pub min_future_price_date: Option<u64>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Badge {
-    pub id: Option<u64>,
-    pub text: Option<String>,
-    pub background_color: Option<String>,
-    pub text_color: Option<String>,
-}
-
-// ── Output serialization ─────────────────────────────────────────────
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ProductRecord {
-    product_id: u64,
-    title: String,
-    category_id: u64,
-    min_full_price: Option<u64>,
-    min_sell_price: Option<u64>,
-    discount_percent: u64,
-    feedback_quantity: Option<u64>,
-    rating: Option<f64>,
-    is_single_sku: Option<bool>,
-    badges: Vec<BadgeRecord>,
-    promo_future_info: Option<PromoFutureRecord>,
-    delivery_options: Option<DeliveryRecord>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct BadgeRecord {
-    id: Option<u64>,
-    text: Option<String>,
-    background_color: Option<String>,
-    text_color: Option<String>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PromoFutureRecord {
-    min_future_price: Option<u64>,
-    min_future_price_date: Option<u64>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct DeliveryRecord {
-    short_date: Option<String>,
-    stock_type: Option<String>,
-}
-
-// ── State ────────────────────────────────────────────────────────────
+// ── State ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct CategoryProgress {
-    pub total: u64,
-    pub offset: u64,
+struct CategoryProgress {
+    total: u64,
+    offset: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct StateFile {
-    pub version: u64,
-    pub categories: HashMap<String, CategoryProgress>,
-    pub item_count: u64,
-    pub updated_at: String,
+struct StateFile {
+    version: u64,
+    categories: HashMap<String, CategoryProgress>,
+    item_count: u64,
+    updated_at: String,
 }
 
-// ── Paths & config ───────────────────────────────────────────────────
+impl Default for StateFile {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            categories: HashMap::new(),
+            item_count: 0,
+            updated_at: String::new(),
+        }
+    }
+}
 
-pub fn data_root() -> PathBuf {
+// ── Paths & auth ────────────────────────────────────────────────────
+
+fn data_root() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     PathBuf::from(home).join(".local/share/uzum")
 }
 
-pub fn output_file() -> PathBuf {
-    data_root().join("uzum_data.jsonl")
-}
-
-pub fn state_file() -> PathBuf {
-    data_root().join("state.json")
-}
-
-pub fn lock_file() -> PathBuf {
-    data_root().join("uzum.lock")
-}
-
-pub fn read_auth() -> (Option<String>, Option<String>) {
+fn read_auth() -> (Option<String>, Option<String>) {
     (
         std::env::var("UZUM_ACCESS_TOKEN").ok(),
         std::env::var("UZUM_INSTALL_ID").ok(),
     )
 }
 
-pub fn build_agent() -> ureq::Agent {
-    ureq::Agent::config_builder()
-        .user_agent(USER_AGENT)
-        .http_status_as_error(false)
-        .timeout_connect(Some(CONNECT_TIMEOUT))
-        .timeout_global(Some(REQUEST_TIMEOUT))
-        .build()
-        .new_agent()
+fn persist(path: &PathBuf, categories: &HashMap<String, CategoryProgress>, item_count: u64) {
+    let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S.000Z").to_string();
+    let state = StateFile {
+        version: 1,
+        categories: categories.clone(),
+        item_count,
+        updated_at: ts,
+    };
+    let tmp = path.with_extension("tmp");
+    if let Ok(json) = serde_json::to_string(&state) {
+        if fs::write(&tmp, &json).is_ok() {
+            let _ = fs::rename(&tmp, path);
+        }
+    }
 }
 
-// ── HTTP helpers ─────────────────────────────────────────────────────
+// ── Category tree ───────────────────────────────────────────────────
 
-pub fn fetch_category_tree(agent: &ureq::Agent) -> Vec<CategoryNode> {
+fn fetch_category_tree(agent: &ureq::Agent) -> Vec<CategoryNode> {
     let url = format!("{REST_BASE}/main/root-categories?eco=false");
     let (token, iid) = read_auth();
-    let mut req = agent
-        .get(&url)
-        .header("Accept", "application/json");
+    let mut req = agent.get(&url).header("Accept", "application/json");
     if let Some(t) = token {
         req = req.header("Authorization", format!("Bearer {t}"));
     }
@@ -235,7 +146,7 @@ pub fn fetch_category_tree(agent: &ureq::Agent) -> Vec<CategoryNode> {
     }
 }
 
-pub fn leaf_nodes(nodes: &[CategoryNode]) -> Vec<&CategoryNode> {
+fn leaf_nodes(nodes: &[CategoryNode]) -> Vec<&CategoryNode> {
     let mut out = Vec::new();
     for n in nodes {
         match &n.children {
@@ -246,7 +157,9 @@ pub fn leaf_nodes(nodes: &[CategoryNode]) -> Vec<&CategoryNode> {
     out
 }
 
-pub fn graphql_request(
+// ── GraphQL ─────────────────────────────────────────────────────────
+
+fn graphql_request(
     agent: &ureq::Agent,
     query: &str,
     vars: &serde_json::Value,
@@ -264,14 +177,17 @@ pub fn graphql_request(
         .header("apollographql-client-name", "web-customers")
         .header("apollographql-client-version", "1.63.2")
         .header("city-id", "1");
-    if let Some(t) = token {
+    if let Some(t) = &token {
         req = req.header("Authorization", format!("Bearer {t}"));
     }
-    if let Some(i) = iid {
+    if let Some(i) = &iid {
         req = req.header("X-Iid", i);
     }
     let resp = req.send(&body_str).map_err(|e| format!("HTTP: {e}"))?;
-    let text = resp.into_body().read_to_string().map_err(|e| format!("Body: {e}"))?;
+    let text = resp
+        .into_body()
+        .read_to_string()
+        .map_err(|e| format!("Body: {e}"))?;
     let parsed: GqlResponse<serde_json::Value> =
         serde_json::from_str(&text).map_err(|e| format!("JSON: {e}"))?;
     if let Some(errs) = parsed.errors {
@@ -281,12 +197,12 @@ pub fn graphql_request(
     parsed.data.ok_or_else(|| "No data".into())
 }
 
-pub fn search_category(
+fn search_category(
     agent: &ureq::Agent,
     category_id: u64,
     offset: u64,
     limit: u64,
-) -> Result<SearchResult, String> {
+) -> Result<serde_json::Value, String> {
     let q = r#"
         query MakeSearch_ItemsAndFilters($queryInput: MakeSearchQueryInput!) {
             makeSearch(query: $queryInput) {
@@ -309,7 +225,7 @@ pub fn search_category(
     "#;
     let vars = serde_json::json!({
         "queryInput": {
-            "offerCategoryId": category_id.to_string(),
+            "categoryId": category_id.to_string(),
             "showAdultContent": "TRUE",
             "filters": [],
             "sort": "BY_ORDERS_NUMBER_DESC",
@@ -320,109 +236,10 @@ pub fn search_category(
         }
     });
     let data = graphql_request(agent, q, &vars, Some("MakeSearch_ItemsAndFilters"))?;
-    let ms: MakeSearchData = serde_json::from_value(data).map_err(|e| format!("Parse: {e}"))?;
-    Ok(ms.make_search.unwrap_or(SearchResult {
-        items: None,
-        total: None,
-    }))
+    Ok(data["makeSearch"].clone())
 }
 
-// ── Product mapping ──────────────────────────────────────────────────
-
-fn build_product(card: &ProductCard, cat_id: u64) -> ProductRecord {
-    let full = card.min_full_price.unwrap_or(0);
-    let sell = card.min_sell_price.unwrap_or(0);
-    let discount_percent = if full > 0 && sell < full {
-        ((1.0 - sell as f64 / full as f64) * 100.0).round() as u64
-    } else {
-        0
-    };
-
-    ProductRecord {
-        product_id: card.product_id,
-        title: card.title.clone().unwrap_or_default(),
-        category_id: cat_id,
-        min_full_price: card.min_full_price,
-        min_sell_price: card.min_sell_price,
-        discount_percent,
-        feedback_quantity: card.feedback_quantity,
-        rating: card.rating,
-        is_single_sku: card.buying_options.as_ref().and_then(|bo| bo.is_single_sku),
-        badges: card
-            .badges
-            .as_ref()
-            .map(|bs| {
-                bs.iter()
-                    .filter(|b| b.id.is_some() || b.text.is_some())
-                    .map(|b| BadgeRecord {
-                        id: b.id,
-                        text: b.text.clone(),
-                        background_color: b.background_color.clone(),
-                        text_color: b.text_color.clone(),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
-        promo_future_info: card.promo_future_info.as_ref().map(|p| PromoFutureRecord {
-            min_future_price: p.min_future_price,
-            min_future_price_date: p.min_future_price_date,
-        }),
-        delivery_options: card
-            .buying_options
-            .as_ref()
-            .and_then(|bo| bo.delivery_options.as_ref())
-            .map(|d| DeliveryRecord {
-                short_date: d.short_date.clone(),
-                stock_type: d.stock_type.clone(),
-            }),
-    }
-}
-
-// ── Time ─────────────────────────────────────────────────────────────
-
-pub fn iso_now() -> String {
-    let d = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let s = d.as_secs();
-    let (y, mo, dy) = civil_from_days((s / 86400) as i64);
-    let h = (s % 86400) / 3600;
-    let m = (s % 3600) / 60;
-    let sec = s % 60;
-    format!("{y:04}-{mo:02}-{dy:02}T{h:02}:{m:02}:{sec:02}.000Z")
-}
-
-fn civil_from_days(days: i64) -> (i64, i64, i64) {
-    let z = days + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    (y, m, d)
-}
-
-// ── State persistence ────────────────────────────────────────────────
-
-fn persist(categories: &HashMap<String, CategoryProgress>, item_count: u64) {
-    let state = StateFile {
-        version: 1,
-        categories: categories.clone(),
-        item_count,
-        updated_at: iso_now(),
-    };
-    let tmp = state_file().with_extension("tmp");
-    if let Ok(s) = serde_json::to_string(&state) {
-        let _ = fs::write(&tmp, &s);
-        let _ = fs::rename(&tmp, state_file());
-    }
-}
-
-// ── Main ─────────────────────────────────────────────────────────────
+// ── Main ────────────────────────────────────────────────────────────
 
 fn main() {
     let is_refresh = std::env::args().any(|a| a == "--refresh");
@@ -430,7 +247,8 @@ fn main() {
     let root = data_root();
     fs::create_dir_all(&root).expect("Failed to create data directory");
 
-    let lock_file = File::create(lock_file()).expect("Failed to create lock file");
+    let lock_path = root.join("uzum.lock");
+    let lock_file = File::create(&lock_path).expect("Failed to create lock file");
     fs2::FileExt::try_lock_exclusive(&lock_file).expect("Another instance is already running");
 
     let agent = build_agent();
@@ -445,30 +263,27 @@ fn main() {
     let leaves = leaf_nodes(&tree);
     eprintln!("[INFO] {} leaf categories", leaves.len());
 
-    let ts = iso_now();
+    let state_path = root.join("state.json");
+    let out_path = root.join("uzum_data.jsonl");
 
-    let state: Option<StateFile> = fs::read_to_string(state_file())
+    let saved: StateFile = fs::read_to_string(&state_path)
         .ok()
-        .and_then(|s| serde_json::from_str(&s).ok());
-
-    let mut categories: HashMap<String, CategoryProgress> = state
-        .as_ref()
-        .map(|s| s.categories.clone())
+        .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
+    let mut categories = saved.categories;
+    let mut item_count = saved.item_count;
 
-    let mut item_count = state.as_ref().map(|s| s.item_count).unwrap_or(0);
-
-    let out = output_file();
-    let mut writer: BufWriter<File> = if is_refresh && out.exists() {
-        BufWriter::new(
+    let mut writer: Box<dyn Write> = if is_refresh && out_path.exists() {
+        Box::new(BufWriter::new(
             fs::OpenOptions::new()
                 .append(true)
                 .create(true)
-                .open(&out)
+                .open(&out_path)
                 .unwrap(),
-        )
+        ))
     } else {
-        let file = File::create(&out).unwrap();
+        let file = File::create(&out_path).unwrap();
+        let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S.000Z").to_string();
         let mut w = BufWriter::new(file);
         writeln!(
             w,
@@ -482,11 +297,10 @@ fn main() {
             .unwrap()
         )
         .ok();
-        w
+        Box::new(w)
     };
 
     let total = leaves.len();
-    eprintln!("[INFO] Scanning...");
 
     for (i, node) in leaves.iter().enumerate() {
         let cid = node.id;
@@ -494,20 +308,17 @@ fn main() {
         let key = cid.to_string();
         let d = i as u64 + 1;
 
-        if is_refresh {
-            if let Some(p) = categories.get(&key) {
-                if p.offset >= OFFSET_CAP || p.offset >= p.total {
-                    if d % 50 == 0 || d == total as u64 {
-                        let el = start.elapsed();
-                        eprintln!(
-                            "[INFO] {d}/{total} ({ctitle}) — {item_count} items [{}.{:03}s]",
-                            el.as_secs(),
-                            el.subsec_millis()
-                        );
-                        persist(&categories, item_count);
-                    }
-                    continue;
+        let maybe_progress = |k: &str| -> Option<&CategoryProgress> {
+            if is_refresh { categories.get(k) } else { None }
+        };
+
+        if let Some(p) = maybe_progress(&key) {
+            if p.offset >= OFFSET_CAP || p.offset >= p.total {
+                if d % 50 == 0 || d == total as u64 {
+                    log_progress(d, total, item_count, &start);
+                    persist(&state_path, &categories, item_count);
                 }
+                continue;
             }
         }
 
@@ -515,63 +326,35 @@ fn main() {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("[WARN] {ctitle} ({cid}): {e}");
-                if d % 50 == 0 || d == total as u64 {
-                    let el = start.elapsed();
-                    eprintln!(
-                        "[INFO] {d}/{total} ({ctitle}) — {item_count} items [{}.{:03}s]",
-                        el.as_secs(),
-                        el.subsec_millis()
-                    );
-                    persist(&categories, item_count);
-                }
+                log_progress_if_needed(d, total, item_count, &start, &state_path, &categories);
                 continue;
             }
         };
 
-        let api_total = first.total.unwrap_or(0);
+        let api_total = first["total"].as_u64().unwrap_or(0);
         if api_total == 0 {
-            if d % 50 == 0 || d == total as u64 {
-                let el = start.elapsed();
-                eprintln!(
-                    "[INFO] {d}/{total} ({ctitle}) — {item_count} items [{}.{:03}s]",
-                    el.as_secs(),
-                    el.subsec_millis()
-                );
-                persist(&categories, item_count);
-            }
+            log_progress_if_needed(d, total, item_count, &start, &state_path, &categories);
+            categories.insert(key, CategoryProgress { total: 0, offset: 0 });
             continue;
         }
 
         if is_refresh {
             if let Some(p) = categories.get(&key) {
                 if p.total == api_total && p.offset >= api_total.min(OFFSET_CAP) {
-                    if d % 50 == 0 || d == total as u64 {
-                        let el = start.elapsed();
-                        eprintln!(
-                            "[INFO] {d}/{total} ({ctitle}) — {item_count} items [{}.{:03}s]",
-                            el.as_secs(),
-                            el.subsec_millis()
-                        );
-                        persist(&categories, item_count);
-                    }
+                    log_progress_if_needed(d, total, item_count, &start, &state_path, &categories);
                     continue;
                 }
             }
         }
 
         let limit = api_total.min(OFFSET_CAP);
+        let page_0_items = first["items"]
+            .as_array()
+            .map(|v| v.to_vec())
+            .unwrap_or_default();
 
-        let page_0_cards: Vec<_> = first
-            .items
-            .as_deref()
-            .unwrap_or_default()
-            .iter()
-            .filter_map(|i| i.catalog_card.as_ref())
-            .collect();
-
-        for card in &page_0_cards {
-            let p = build_product(card, cid);
-            let _ = writeln!(writer, "{}", serde_json::to_string(&p).unwrap());
+        for item_val in &page_0_items {
+            let _ = writeln!(writer, "{}", serde_json::to_string(item_val).unwrap());
             item_count += 1;
         }
 
@@ -583,19 +366,15 @@ fn main() {
             }
             match search_category(&agent, cid, offset, BATCH_SIZE) {
                 Ok(r) => {
-                    let cards: Vec<_> = r
-                        .items
-                        .as_deref()
-                        .unwrap_or_default()
-                        .iter()
-                        .filter_map(|i| i.catalog_card.as_ref())
-                        .collect();
-                    if cards.is_empty() {
+                    let items = r["items"]
+                        .as_array()
+                        .map(|v| v.to_vec())
+                        .unwrap_or_default();
+                    if items.is_empty() {
                         break;
                     }
-                    for card in &cards {
-                        let p = build_product(card, cid);
-                        let _ = writeln!(writer, "{}", serde_json::to_string(&p).unwrap());
+                    for item_val in &items {
+                        let _ = writeln!(writer, "{}", serde_json::to_string(item_val).unwrap());
                         item_count += 1;
                     }
                     page += 1;
@@ -619,98 +398,43 @@ fn main() {
         );
 
         if d % 50 == 0 || d == total as u64 {
-            let el = start.elapsed();
-            eprintln!(
-                "[INFO] {d}/{total} ({ctitle}) — {item_count} items [{}.{:03}s]",
-                el.as_secs(),
-                el.subsec_millis()
-            );
-            persist(&categories, item_count);
+            log_progress(d, total, item_count, &start);
+            persist(&state_path, &categories, item_count);
         }
     }
 
-    persist(&categories, item_count);
+    persist(&state_path, &categories, item_count);
 
-    let el = start.elapsed();
+    let elapsed = start.elapsed();
     eprintln!(
         "[INFO] Done: {item_count} items in {}.{:03}s",
+        elapsed.as_secs(),
+        elapsed.subsec_millis()
+    );
+    eprintln!("[INFO] Output: {}", out_path.display());
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────
+
+fn log_progress(d: u64, total: usize, item_count: u64, start: &Instant) {
+    let el = start.elapsed();
+    eprintln!(
+        "[INFO] {d}/{total} — {item_count} items [{}.{:03}s]",
         el.as_secs(),
         el.subsec_millis()
     );
-    eprintln!("[INFO] Output: {}", output_file().display());
 }
 
-// ── Tests ────────────────────────────────────────────────────────────
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn card(price_full: Option<u64>, price_sell: Option<u64>) -> ProductCard {
-        ProductCard {
-            product_id: 1,
-            title: Some("Widget".into()),
-            min_full_price: price_full,
-            min_sell_price: price_sell,
-            feedback_quantity: Some(10),
-            rating: Some(4.0),
-            buying_options: None,
-            promo_future_info: None,
-            badges: None,
-        }
-    }
-
-    #[test]
-    fn discount_computed() {
-        let p = build_product(&card(Some(1000), Some(700)), 99);
-        assert_eq!(p.product_id, 1);
-        assert_eq!(p.min_sell_price, Some(700));
-        assert_eq!(p.discount_percent, 30);
-    }
-
-    #[test]
-    fn no_discount_when_equal() {
-        let p = build_product(&card(Some(500), Some(500)), 1);
-        assert_eq!(p.discount_percent, 0);
-        assert_eq!(p.rating, Some(4.0));
-    }
-
-    #[test]
-    fn null_fields_stay_null() {
-        let c = ProductCard {
-            product_id: 2,
-            title: None,
-            min_full_price: None,
-            min_sell_price: None,
-            feedback_quantity: None,
-            rating: None,
-            buying_options: None,
-            promo_future_info: None,
-            badges: None,
-        };
-        let p = build_product(&c, 1);
-        assert_eq!(p.title, "");
-        assert_eq!(p.discount_percent, 0);
-        assert!(p.badges.is_empty());
-        assert!(p.promo_future_info.is_none());
-        assert!(p.delivery_options.is_none());
-    }
-
-    #[test]
-    fn serializes_to_camel_case() {
-        let p = build_product(&card(Some(2000), Some(1500)), 2);
-        let v = serde_json::to_value(&p).unwrap();
-        assert_eq!(v["productId"], 1);
-        assert_eq!(v["minSellPrice"], 1500);
-        assert_eq!(v["minFullPrice"], 2000);
-        assert_eq!(v["categoryId"], 2);
-        assert!(v.get("priceBlock").is_none());
-    }
-
-    #[test]
-    fn iso_format_sane() {
-        let s = iso_now();
-        assert!(s.len() > 20);
-        assert!(s.ends_with('Z'));
+fn log_progress_if_needed(
+    d: u64,
+    total: usize,
+    item_count: u64,
+    start: &Instant,
+    state_path: &PathBuf,
+    categories: &HashMap<String, CategoryProgress>,
+) {
+    if d % 50 == 0 || d == total as u64 {
+        log_progress(d, total, item_count, start);
+        persist(state_path, categories, item_count);
     }
 }

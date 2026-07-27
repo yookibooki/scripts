@@ -60,37 +60,42 @@ State saves automatically after each poll cycle.
 
 ## Output format
 
-`~/.local/share/birbir/birbir_export.jsonl` — JSON Lines, one offer per line:
+`~/.local/share/birbir/birbir_export.jsonl` — JSON Lines, one raw API offer object per line.
+
+Each line is the **complete raw offer JSON** as returned by `POST /offer/feed`. The tool performs zero transformation — it writes the API response items directly via `serde_json::to_string()` pass-through.
+
+Example output (abbreviated):
 
 ```json
 {
   "id": 272116974,
-  "url": "https://birbir.uz/uz/toshkent/cat/telefonlar/smartfonlar/o/iphon-14-pro-272116974",
   "title": "Iphon 14 pro",
   "price": 500000000,
-  "currency": "UZS",
-  "city": "Toshkent",
-  "published_at": 1784694169564,
-  "category_path": "telefonlar/smartfonlar"
+  "publishedAt": 1784694169564,
+  "webUri": "uz/toshkent/cat/telefonlar/smartfonlar/o/iphon-14-pro-272116974",
+  "urgentSale": false,
+  "courierDelivery": false,
+  "business": false,
+  "agency": false,
+  "closed": false,
+  "region": {
+    "titlePath": ["Telefonlar", "Smartfonlar"],
+    "location": { "coordinates": [69.2401, 41.3328] }
+  },
+  "seller": {
+    "uuid": "...",
+    "name": "..."
+  }
 }
 ```
 
-Fields:
-- **id** — unique offer ID
-- **url** — full permalink to the listing
-- **title** — listing title
-- **price** — numeric price value
-- **currency** — currency code (UZS or USD)
-- **city** — location from the listing
-- **published_at** — epoch timestamp (ms)
-- **category_path** — category hierarchy (e.g. "telefonlar/smartfonlar")
+**Important**: The output is the raw API response — it is NOT flattened. Category path is `region.titlePath[]`, seller info is in the nested `seller` object, coordinates are in `region.location.coordinates`. Prepend `https://birbir.uz/` to `webUri` for the full URL. See `wiki/birbir-api/birbir-api-reference.md` for the full schema.
 
 ## Files
 
 | File | Purpose |
 |------|---------|
-| `src/main.rs` | Rust monitor — polls listings |
-| `src/lib.rs` | Shared library — API client, auth, helpers |
+| `src/main.rs` | Rust monitor — polls listings, auth, API client (single file, no lib.rs) |
 | `Cargo.toml` | Rust package manifest |
 | `~/.local/share/birbir/state.json` | Persisted max seen ID |
 | `~/.local/share/birbir/birbir_export.jsonl` | Output — JSON Lines |

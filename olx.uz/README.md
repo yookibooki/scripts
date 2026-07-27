@@ -4,35 +4,32 @@ Collects all listings from [OLX.uz](https://www.olx.uz) into a machine-readable 
 
 ## Output format
 
-`~/.local/share/olx/olx_export.jsonl` — JSON Lines, one post per line:
+`~/.local/share/olx/olx_export.jsonl` — JSON Lines, one raw API offer object per line.
+
+Each line is the **complete raw offer JSON** as returned by `GET /api/v1/offers`. The tool performs zero transformation — it writes the API response data items directly.
+
+Example output (abbreviated):
 
 ```json
 {
   "id": 62539007,
   "url": "https://www.olx.uz/d/obyavlenie/...",
-  "title": "Полировка керамика авто 800 000 сумдан бошлаб",
-  "description": "Профессиональная полировка и керамическое покрытие...",
-  "price": "800000",
-  "category_type": "automotive",
-  "city": "Ташкент",
-  "district": "Юнусабадский район",
-  "region": "Ташкентская область",
-  "last_refresh_time": "2026-07-21T00:12:04+05:00"
+  "title": "Полировка керамика авто",
+  "description": "Профессиональная полировка...",
+  "last_refresh_time": "2026-07-21T00:12:04+05:00",
+  "created_time": "2026-07-20T15:30:00+05:00",
+  "params": [{"key": "price", "value": {...}}],
+  "category": { "id": 317, "type": "automotive" },
+  "location": { "city": {...}, "region": {...} },
+  "map": { "lat": 41.3, "lon": 69.2 },
+  "user": { "id": 123, "name": "..." },
+  "photos": [],
+  "business": false,
+  "status": "active"
 }
 ```
 
-| Field | Description |
-|-------|-------------|
-| `id` | Unique OLX listing ID |
-| `url` | Direct link to the listing |
-| `title` | Listing title |
-| `description` | Full description (HTML stripped) |
-| `price` | Price as displayed on OLX |
-| `category_type` | Category group (e.g. `electronics`, `automotive`) |
-| `city` | City name |
-| `district` | District name |
-| `region` | Region name |
-| `last_refresh_time` | ISO timestamp of last refresh/bump |
+**Important**: The output is the raw API response — it is NOT flattened. Price is inside `params[]`, category is a nested object, location is nested. See `wiki/olx-api/olx-api-reference.md` for the full schema.
 
 ## Quick start
 
@@ -72,8 +69,7 @@ POLL_INTERVAL=60000 ./target/release/olx-watch
 
 | File | Purpose |
 |------|---------|
-| `src/main.rs` | Unified binary — two-phase collection |
-| `src/lib.rs` | Shared utilities (HTTP, parsing, helpers) |
+| `src/main.rs` | Unified binary — two-phase collection (single file, no lib.rs) |
 | `Cargo.toml` | Rust package manifest |
 | `~/.local/share/olx/olx_export.jsonl` | Output — all collected listings (JSON Lines) |
 | `~/.local/share/olx/state.json` | State — max_id, initial_complete, known_categories |
