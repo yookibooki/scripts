@@ -2,9 +2,8 @@
 
 <!--
 Topic sections added here during ingest.
-See skill://karpathy-llm-wiki/references/index-template.md for format.
+See '/home/dev/.agents/skills/karpathy-llm-wiki/references/index-template.md' for format.
 -->
-
 
 ## Project Overview
 
@@ -22,4 +21,10 @@ See skill://karpathy-llm-wiki/references/index-template.md for format.
 
 | Article | Summary | Updated |
 |---------|---------|---------|
-| [idlewatch](tools/idlewatch.md) | Bash idle-monitor: turns screen off after idle periods and enforces short/long work breaks | 2026-07-27 |
+| [idlewatch](tools/idlewatch.md) — X11 idle monitor and break timer | 2026-07-27 |
+
+## Notes
+
+| Article | Summary | Updated |
+|---------|---------|---------|
+| [BirBir Live API Findings](collectors/birbir-findings.md) — Investigation notes on BirBir API infrastructure and endpoints | 2026-07-27 |
