@@ -1,7 +1,7 @@
 # idlewatch
 
 > Sources: linux/idlewatch, 2026-07-27
-> Raw: [2026-07-27-idlewatch.md](../../raw/collectors/2026-07-27-idlewatch.md)
+> Raw: [idlewatch](../../raw/collectors/linux-idlewatch.sh)
 > Updated: 2026-07-27
 
 A bash script that monitors X11 idle time and turns the screen off after idle periods, then enforces short and long work breaks by blocking the display for a configured duration.
