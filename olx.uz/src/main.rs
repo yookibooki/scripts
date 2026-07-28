@@ -11,7 +11,6 @@ const USER_AGENT: &str =
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
 const PAGE_SIZE: u64 = 50;
 const MAX_OFFSET: u64 = 1000;
-const POLL_DELAY: Duration = Duration::from_millis(100);
 
 fn data_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
@@ -234,7 +233,6 @@ fn phase1_initial_collection(agent: &ureq::Agent, state: &mut State) {
             break;
         }
         offset += PAGE_SIZE;
-        std::thread::sleep(POLL_DELAY);
     }
 
     eprintln!(
@@ -274,7 +272,6 @@ fn phase1_initial_collection(agent: &ureq::Agent, state: &mut State) {
                 break;
             }
             offset += PAGE_SIZE;
-            std::thread::sleep(POLL_DELAY);
         }
     }
 
@@ -331,7 +328,6 @@ fn phase2_poll_new(agent: &ureq::Agent, state: &mut State) -> u32 {
             break;
         }
         offset += PAGE_SIZE;
-        std::thread::sleep(POLL_DELAY);
     }
 
     if new_count > 0 {

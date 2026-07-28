@@ -1,37 +1,17 @@
 # Wiki Log
 
-<!--
-Operation log entries appended here during ingest/lint/archive.
-See '/home/dev/.agents/skills/karpathy-llm-wiki' for format.
--->
+## 2026-07-28 | Initial wiki setup
+- Created index, overview, and three collector articles
+- Grounded in raw/collectors/ research notes
 
-## [2026-07-27] ingest | Project Overview
-
+## 2026-07-28 | ingest | BirBir.uz collector
 - Disposition: New
-- Raw: raw/collectors/2026-07-27-purpose.md; raw/collectors/2026-07-27-agents.md; raw/collectors/2026-07-27-olx-wiki.md; raw/collectors/2026-07-27-olx-readme.md; raw/collectors/2026-07-27-olx-agents.md; raw/collectors/2026-07-27-olx-wiki.md; raw/collectors/2026-07-27-birbir-wiki.md; raw/collectors/2026-07-27-birbir-readme.md; raw/collectors/2026-07-27-birbir-agents.md; raw/collectors/2026-07-27-birbir-findings.md; raw/collectors/2026-07-27-birbir-wiki.md; raw/collectors/2026-07-27-uzum-wiki.md; raw/collectors/2026-07-27-uzum-agents.md; raw/collectors/linux-idlewatch.sh
-- Updated: olx-uz.md; birbir-uz.md; uzum-uz.md; idlewatch.md; birbir-findings.md
+- Raw: raw/collectors/2026-07-27-birbir-readme.md; raw/collectors/2026-07-27-birbir-agents.md; raw/collectors/2026-07-27-birbir-findings.md; raw/collectors/2026-07-27-birbir-wiki.md
 
-## [2026-07-27] ingest | olx-uz
-
+## 2026-07-28 | ingest | OLX.uz collector
 - Disposition: New
-- Raw: raw/collectors/2026-07-27-olx-wiki.md; raw/collectors/2026-07-27-olx-readme.md; raw/collectors/2026-07-27-olx-agents.md; raw/collectors/2026-07-27-olx-wiki.md
+- Raw: raw/collectors/2026-07-27-olx-readme.md; raw/collectors/2026-07-27-olx-agents.md; raw/collectors/2026-07-27-olx-wiki.md
 
-## [2026-07-27] ingest | birbir-uz
-
+## 2026-07-28 | ingest | Uzum.uz collector
 - Disposition: New
-- Raw: raw/collectors/2026-07-27-birbir-wiki.md; raw/collectors/2026-07-27-birbir-readme.md; raw/collectors/2026-07-27-birbir-agents.md; raw/collectors/2026-07-27-birbir-findings.md; raw/collectors/2026-07-27-birbir-wiki.md
-
-## [2026-07-27] ingest | uzum-uz
-
-- Disposition: New
-- Raw: raw/collectors/2026-07-27-uzum-wiki.md; raw/collectors/2026-07-27-uzum-agents.md; raw/collectors/2026-07-27-uzum-wiki.md; raw/collectors/2026-07-27-uzum-wiki.md; raw/collectors/2026-07-27-uzum-wiki.md
-
-## [2026-07-27] ingest | idlewatch
-
-- Disposition: New
-- Raw: raw/collectors/linux-idlewatch.sh
-
-## [2026-07-27] ingest | birbir-findings
-
-- Disposition: New
-- Raw: raw/collectors/2026-07-27-birbir-findings.md; raw/collectors/2026-07-27-birbir-wiki.md
+- Raw: raw/collectors/2026-07-27-uzum-agents.md; raw/collectors/2026-07-27-uzum-wiki.md; raw/collectors/2026-07-27-uzum-network-requests.md; raw/collectors/2026-07-27-uzum-live-snapshot.md

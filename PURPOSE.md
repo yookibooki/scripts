@@ -1,3 +1,3 @@
-Continuously archive classifieds and marketplace listings from BirBir.uz, OLX.uz, and Uzum.uz into lossless JSONL exports. The resulting dataset feeds downstream AI-driven trading analysis, market intelligence, and trend modeling.
+Archive classifieds and marketplace listings from BirBir.uz, OLX.uz, and Uzum.uz into JSONL exports. The dataset feeds downstream AI-driven trading analysis.
 
-Each collector is a lean Rust binary that performs an initial full catalog sync, then polls incrementally — writing raw API JSON pass-through with zero transformation. State is persisted locally for idempotent incremental runs.
+Each collector is a Rust binary that performs an initial full catalog sync, then polls incrementally. State is persisted locally for idempotent incremental runs.
