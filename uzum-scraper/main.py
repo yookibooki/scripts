@@ -1,4 +1,4 @@
-import json, os, random, sqlite3, time, requests
+import json, os, sqlite3, time, requests
 
 GQL, TOK = "https://graphql.uzum.uz/", "https://id.uzum.uz/api/auth/token"
 CATS = "https://api.uzum.uz/api/main/root-categories?eco=false"
@@ -32,17 +32,11 @@ def token(s):
         "Referer": "https://uzum.uz/", "Accept-Language": "uz"}).cookies["access_token"]
 
 
-def post(s, *a, **k):  # 429 = bot detection (not rate limit): re-auth, back off, retry
+def post(s, *a, **k):
     k.setdefault("timeout", 15)
-    for i in range(4):
-        r = s.post(*a, **k)
-        if r.status_code in (401, 429):
-            s.headers["Authorization"] = token(s)
-            time.sleep(1.5 * 2 ** i + random.random())
-            continue
-        r.raise_for_status()
-        return r
-    raise RuntimeError(f"persistent HTTP {r.status_code}")
+    r = s.post(*a, **k)
+    r.raise_for_status()
+    return r
 
 
 s = requests.Session()
@@ -79,10 +73,9 @@ def price(card):
 
 db = sqlite3.connect("sqlite.db")
 db.execute("""CREATE TABLE IF NOT EXISTS items (productId INTEGER PRIMARY KEY, title TEXT,
-             category TEXT, price REAL, photoUrls TEXT, date INTEGER)""")
-db.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
-row = db.execute("SELECT value FROM meta WHERE key='done'").fetchone()
-done = set(json.loads(row[0])) if row else set()
+             category TEXT, price INTEGER, photoUrls TEXT, date INTEGER)""")
+db.execute("CREATE TABLE IF NOT EXISTS scrape_state (categoryId INTEGER PRIMARY KEY, done_at INTEGER)")
+done = {r[0] for r in db.execute("SELECT categoryId FROM scrape_state")}
 
 cats = [c for c in leaves() if c not in done]
 if os.environ.get("MAX_CATS"):  # test-run cap; omit for a full scrape
@@ -90,7 +83,7 @@ if os.environ.get("MAX_CATS"):  # test-run cap; omit for a full scrape
 
 now = int(time.time())
 for i, cid in enumerate(cats):
-    seen, rows = set(), []
+    seen = set()
     try:
         for off in range(0, 9900, 100):  # offset >= 9900 rejected by the API
             q = {"categoryId": cid, "showAdultContent": "TRUE", "filters": [],
@@ -102,7 +95,6 @@ for i, cid in enumerate(cats):
             new_rows = [(c["productId"], c["title"], (c.get("category") or {}).get("title"), price(c),
                          json.dumps([p["key"] for p in ((c.get("discovery") or {}).get("photos") or []) if "key" in p]), now)
                         for c in fresh]
-            rows += new_rows
             db.executemany("INSERT OR REPLACE INTO items VALUES (?, ?, ?, ?, ?, ?)", new_rows)
             db.commit()  # partial categories survive crashes; reruns just REPLACE
             if len(items) < 100 or not fresh:
@@ -111,7 +103,7 @@ for i, cid in enumerate(cats):
         print(f"[{i+1}/{len(cats)}] cat {cid}: FAILED ({e}); rows kept, retried next run")
         continue
     done.add(cid)
-    db.execute("INSERT OR REPLACE INTO meta VALUES ('done', ?)", (json.dumps(sorted(done)),))
+    db.execute("INSERT OR REPLACE INTO scrape_state VALUES (?, ?)", (cid, now))
     db.commit()
-    print(f"[{i+1}/{len(cats)}] cat {cid}: {len(rows)} products")
+    print(f"[{i+1}/{len(cats)}] cat {cid}: {len(seen)} products")
 db.close()
