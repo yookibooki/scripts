@@ -7,6 +7,7 @@ CATS = "https://api.uzum.uz/api/main/root-categories?eco=false"
 # discovery or buyingOptions (API A/B-flips); minSellPrice is the last resort.
 Q = """query($q: MakeSearchQueryInput!) {
   makeSearch(query: $q) {
+    total
     items {
       catalogCard {
         productId
@@ -25,6 +26,11 @@ Q = """query($q: MakeSearchQueryInput!) {
   }
 }"""
 
+# Light probe: total count + first page of IDs, to decide whether to deep-scrape.
+P = """query($q: MakeSearchQueryInput!) {
+  makeSearch(query: $q) { total items { catalogCard { productId } } }
+}"""
+
 
 def token(s):
     return "Bearer " + s.post(TOK, timeout=15, headers={
@@ -33,7 +39,7 @@ def token(s):
 
 
 def post(s, *a, **k):
-    k.setdefault("timeout", 15)
+    k.setdefault("timeout", (5, 15))  # connect ≤5s; each read ≤15s (a trickle keeps a plain timeout alive forever)
     r = s.post(*a, **k)
     r.raise_for_status()
     return r
@@ -74,8 +80,16 @@ def price(card):
 db = sqlite3.connect("sqlite.db")
 db.execute("""CREATE TABLE IF NOT EXISTS items (productId INTEGER PRIMARY KEY, title TEXT,
              category TEXT, price INTEGER, photoUrls TEXT, date INTEGER)""")
-db.execute("CREATE TABLE IF NOT EXISTS scrape_state (categoryId INTEGER PRIMARY KEY, done_at INTEGER)")
-done = {r[0] for r in db.execute("SELECT categoryId FROM scrape_state")}
+db.execute("""CREATE TABLE IF NOT EXISTS scrape_state
+             (categoryId INTEGER PRIMARY KEY, done_at INTEGER, total INTEGER)""")
+# Older DBs may lack the total column; add it if missing (harmless no-op otherwise).
+cols = {r[1] for r in db.execute("PRAGMA table_info(scrape_state)")}
+if "total" not in cols:
+    db.execute("ALTER TABLE scrape_state ADD COLUMN total INTEGER")
+    db.commit()
+
+# State maps: done_at + last-known total per category.
+done = {r[0]: r[2] for r in db.execute("SELECT categoryId, done_at, total FROM scrape_state")}
 
 cats = [c for c in leaves() if c not in done]
 if os.environ.get("MAX_CATS"):  # test-run cap; omit for a full scrape
@@ -85,10 +99,20 @@ now = int(time.time())
 for i, cid in enumerate(cats):
     seen = set()
     try:
+        # Probe: total + first page of IDs. If total matches the last known
+        # count, the category is unchanged — skip the deep scrape entirely.
+        base = {"categoryId": cid, "showAdultContent": "TRUE", "filters": [],
+                "sort": "BY_RELEVANCE_DESC", "pagination": {"offset": 0, "limit": 100}}
+        d = post(s, GQL, json={"query": P, "variables": {"q": base}}).json()["data"]["makeSearch"]
+        total = d["total"]
+        if total == done.get(cid):
+            print(f"[{i+1}/{len(cats)}] cat {cid}: unchanged ({total})")
+            continue
+        # Deep-scrape only if the count changed.
         for off in range(0, 9900, 100):  # offset >= 9900 rejected by the API
-            q = {"categoryId": cid, "showAdultContent": "TRUE", "filters": [],
-                 "sort": "BY_RELEVANCE_DESC", "pagination": {"offset": off, "limit": 100}}
-            items = post(s, GQL, json={"query": Q, "variables": {"q": q}}).json()["data"]["makeSearch"]["items"]
+            base["pagination"] = {"offset": off, "limit": 100}
+            items = post(s, GQL, json={"query": Q, "variables": {"q": base}}) \
+                .json()["data"]["makeSearch"]["items"]
             fresh = [c for c in (i.get("catalogCard") for i in items)
                      if c and c.get("productId") is not None and c["productId"] not in seen]
             seen |= {c["productId"] for c in fresh}
@@ -102,8 +126,8 @@ for i, cid in enumerate(cats):
     except Exception as e:
         print(f"[{i+1}/{len(cats)}] cat {cid}: FAILED ({e}); rows kept, retried next run")
         continue
-    done.add(cid)
-    db.execute("INSERT OR REPLACE INTO scrape_state VALUES (?, ?)", (cid, now))
+    done[cid] = total
+    db.execute("INSERT OR REPLACE INTO scrape_state VALUES (?, ?, ?)", (cid, now, total))
     db.commit()
-    print(f"[{i+1}/{len(cats)}] cat {cid}: {len(seen)} products")
+    print(f"[{i+1}/{len(cats)}] cat {cid}: {len(seen)} products (total {total})")
 db.close()
