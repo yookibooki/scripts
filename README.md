@@ -1,0 +1,1 @@
+Gathers all listings from uzum.uz, olx.uz, and birbir.uz into SQLite databases for analysis and to set up a Linux systemd service ~/.config/systemd/user/<placeholder>.{service,timer} that refreshes the databases with new listings every 30 minutes.

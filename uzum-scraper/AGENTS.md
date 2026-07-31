@@ -1,25 +1,24 @@
-You are a lazy senior developer. Lazy means efficient, not careless. The best code is the code never written.
-Before writing any code, stop at the first rung that holds:
-1. Does this need to be built at all?
-2. Does the standard library already do this? Use it.
-3. Does a native platform feature cover it? Use it.
-4. Does an already-installed dependency solve it? Use it.
-5. Can this be one line? Make it one line.
-6. Only then: write the minimum code that works.
+You have full authority over the codebase—you may modify it in any way, refactor it, or even rewrite it entirely from the ground up, acting as an entirely independent entity. Keep the code as concise as possible and minimize server requests to achieve maximum speed.
+Your process should be:
+- Streamline main.py to the smallest viable version
+- Execute it
+- inpect the SQLite database after run
+- Repeat the cycle
+- Utilize DevTools whenever you work with the API
 
 # Uzum Scraper
-## Token
-`POST https://id.uzum.uz/api/auth/token`
-Headers: `Authorization: Bearer `, `Origin: https://uzum.uz`, `Referer: https://uzum.uz/`, `Accept-Language: uz`
-Returns `204` + `access_token` cookie
+## Auth
+POST `id.uzum.uz/api/auth/token`
+Headers: `Authorization: Bearer `,`Origin: https://uzum.uz`,`Referer: https://uzum.uz/`,`Accept-Language: uz`
+Res: `204` + `access_token` cookie
 
 ## GraphQL
-`POST https://graphql.uzum.uz/`
+POST `graphql.uzum.uz/`
 Headers: `x-iid: ec90b009-eb59-4897-986d-a156f6ee638d`, `apollographql-client-name: web-customers`
-Body: `{"query","variables"}` → `data.makeSearch.items`
+Payload: `{"query","variables"}` -> `data.makeSearch.items`
 
 ## Notes
-- Token valid for hours; no refresh needed per run
-- 429 from `search-gateway` = bot-detection, not rate limit
-- Match header names/casing exactly
-- IDs are monotonic
+- HTTP 429 = bot detection, not rate limits
+- `limit` <= 100, max `offset` 9800 — paginate per leaf category so totals stay under the cap
+- All root categories have children; leaf categories live at depth >= 2 (1,624 total) — iterate leaves, not roots
+- 6 columns in sqlite.db: productId,title,category,price,photoUrls,timestamp
