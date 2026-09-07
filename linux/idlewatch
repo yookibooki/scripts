@@ -4,7 +4,8 @@
 # Configuration
 # ==========================================
 LOCK_FILE="${XDG_RUNTIME_DIR:-/tmp}/idlewatch.lock"
-DISPLAY_OUTPUT="eDP-1"
+DISPLAY_OUTPUT="${IDLEWATCH_OUTPUT:-eDP-1}"
+AUDIO_DEVICE="${IDLEWATCH_AUDIO:-plughw:CARD=PCH}"
 NOTIFICATION_SOUND="$HOME/.local/share/sounds/notification.wav"
 
 POLL_INTERVAL=5
@@ -43,6 +44,7 @@ long_elapsed=0
 screen_is_off=0
 sleep_pid=""
 abort_break=0
+in_break=0
 
 # ==========================================
 # Helper Functions
@@ -54,12 +56,18 @@ set_screen() {
 
 play_notification() {
     if [[ -f "$NOTIFICATION_SOUND" ]]; then
-        aplay -q -D plughw:CARD=PCH "$NOTIFICATION_SOUND" 9>&- &>/dev/null &
+        ( aplay -q -D "$AUDIO_DEVICE" "$NOTIFICATION_SOUND" || aplay -q "$NOTIFICATION_SOUND" ) 9>&- &>/dev/null &
     fi
 }
 
 emergency_wake() {
-    abort_break=1
+    # Only flag an abort when a break is actually in progress.
+    # Otherwise a SIGUSR1 during the main-loop poll sleep would leak
+    # abort_break=1 into the next take_break (which would then clear it
+    # and swallow the wake by sleeping the full duration anyway).
+    if (( in_break == 1 )); then
+        abort_break=1
+    fi
     if [[ -n "$sleep_pid" ]]; then
         kill "$sleep_pid" 2>/dev/null
     fi
@@ -70,6 +78,7 @@ take_break() {
 
     set_screen "off"
     screen_is_off=1
+    in_break=1
     abort_break=0
 
     # Sleep in the background so the trap can safely interrupt it
@@ -77,6 +86,7 @@ take_break() {
     sleep_pid=$!
     wait "$sleep_pid" 2>/dev/null
     sleep_pid=""
+    in_break=0
 
     # Restore screen
     set_screen "auto"
@@ -103,10 +113,17 @@ trap 'set_screen "auto"' EXIT
 while true; do
     # 1. Safe Polling: We sleep at the top of the loop in the background.
     # This guarantees that receiving a signal won't crash the script.
+    poll_start=$SECONDS
     sleep "$POLL_INTERVAL" 9>&- &
     sleep_pid=$!
     wait "$sleep_pid" 2>/dev/null
     sleep_pid=""
+    # Belt-and-braces with the in_break guard above: a SIGUSR1 that
+    # interrupted this poll sleep must not leak abort_break=1 into the
+    # next take_break. Also measure the actual slept time so an early
+    # wake doesn't overcount work time by a full POLL_INTERVAL.
+    abort_break=0
+    poll_elapsed=$(( SECONDS - poll_start ))
 
     # 2. Safely read idle time. If X11 is inaccessible, skip this tick.
     idle_ms=$(xprintidle 2>/dev/null)
@@ -137,9 +154,9 @@ while true; do
         continue # Skip accumulating work time while idle
     fi
 
-    # 5. Accumulate active work time
-    (( short_elapsed += POLL_INTERVAL ))
-    (( long_elapsed  += POLL_INTERVAL ))
+    # 5. Accumulate active work time (actual time slept, not full interval)
+    (( short_elapsed += poll_elapsed ))
+    (( long_elapsed  += poll_elapsed ))
 
     # 6. Enforce breaks
     if (( long_elapsed >= LONG_TIMEOUT_S )); then
