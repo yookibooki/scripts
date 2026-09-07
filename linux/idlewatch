@@ -1,68 +1,42 @@
 #!/usr/bin/env bash
-
 LOCK_FILE="${XDG_RUNTIME_DIR:-/tmp}/idlewatch.lock"
 DISPLAY_OUTPUT="${IDLEWATCH_OUTPUT:-eDP-1}"
 AUDIO_DEVICE="${IDLEWATCH_AUDIO:-plughw:CARD=PCH}"
 NOTIFICATION_SOUND="$HOME/.local/share/sounds/notification.wav"
-
 POLL_INTERVAL=5
-
 IDLE_THRESHOLD_S=120
 LONG_TIMER_RESET_IDLE_S=900
-
 SHORT_TIMEOUT_S=1200
 LONG_TIMEOUT_S=3600
-
 SHORT_BREAK_DURATION=30
 LONG_BREAK_DURATION=900
-
 for cmd in xprintidle xrandr aplay; do command -v "$cmd" &>/dev/null || { echo "Error: Required command '$cmd' is not installed." >&2; exit 1; }; done
-
 exec 9>"$LOCK_FILE" || exit 1
 flock -n 9 || { echo "Script is already running."; exit 0; }
-
 short_elapsed=0; long_elapsed=0; screen_is_off=0; sleep_pid=""; abort_break=0; in_break=0
-
 set_screen() { local state="$1"; xrandr --output "$DISPLAY_OUTPUT" --"$state" &>/dev/null || true; }
-
 play_notification() { if [[ -f "$NOTIFICATION_SOUND" ]]; then ( aplay -q -D "$AUDIO_DEVICE" "$NOTIFICATION_SOUND" || aplay -q "$NOTIFICATION_SOUND" ) 9>&- &>/dev/null & fi; }
-
 emergency_wake() { if (( in_break == 1 )); then abort_break=1; fi; if [[ -n "$sleep_pid" ]]; then kill "$sleep_pid" 2>/dev/null; fi; }
-
 take_break() {
     local duration="$1"
-
     set_screen "off"; screen_is_off=1; in_break=1; abort_break=0
-
     sleep "$duration" 9>&- & sleep_pid=$!; wait "$sleep_pid" 2>/dev/null; sleep_pid=""; in_break=0
-
     set_screen "auto"; screen_is_off=0; short_elapsed=0
-
     if (( abort_break == 0 )); then play_notification; fi
 }
-
 trap 'emergency_wake' SIGUSR1; trap 'set_screen "auto"' EXIT
-
 while true; do
     poll_start=$SECONDS; sleep "$POLL_INTERVAL" 9>&- & sleep_pid=$!; wait "$sleep_pid" 2>/dev/null; sleep_pid=""; abort_break=0; poll_elapsed=$(( SECONDS - poll_start ))
-
     idle_ms=$(xprintidle 2>/dev/null)
     if ! [[ "$idle_ms" =~ ^[0-9]+$ ]]; then continue; fi
-
     idle_s=$(( idle_ms / 1000 ))
-
     if (( screen_is_off == 1 )) && (( idle_s < IDLE_THRESHOLD_S )); then set_screen "auto"; screen_is_off=0; fi
-
     if (( idle_s >= IDLE_THRESHOLD_S )); then
         if (( screen_is_off == 0 )); then set_screen "off"; screen_is_off=1; fi
-
         short_elapsed=0
-
         if (( idle_s >= LONG_TIMER_RESET_IDLE_S )); then long_elapsed=0; fi
         continue
     fi
-
     (( short_elapsed += poll_elapsed, long_elapsed += poll_elapsed ))
-
     if (( long_elapsed >= LONG_TIMEOUT_S )); then long_elapsed=0; take_break "$LONG_BREAK_DURATION"; elif (( short_elapsed >= SHORT_TIMEOUT_S )); then take_break "$SHORT_BREAK_DURATION"; fi
 done
