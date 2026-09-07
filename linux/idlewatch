@@ -1,8 +1,5 @@
 #!/usr/bin/env bash
 
-# ==========================================
-# Configuration
-# ==========================================
 LOCK_FILE="${XDG_RUNTIME_DIR:-/tmp}/idlewatch.lock"
 DISPLAY_OUTPUT="${IDLEWATCH_OUTPUT:-eDP-1}"
 AUDIO_DEVICE="${IDLEWATCH_AUDIO:-plughw:CARD=PCH}"
@@ -10,21 +7,15 @@ NOTIFICATION_SOUND="$HOME/.local/share/sounds/notification.wav"
 
 POLL_INTERVAL=5
 
-# Thresholds (in seconds)
-IDLE_THRESHOLD_S=120           # 2 minutes: Turn screen off if idle
-LONG_TIMER_RESET_IDLE_S=900    # 15 minutes: Reset long break timer if idle this long
+IDLE_THRESHOLD_S=120
+LONG_TIMER_RESET_IDLE_S=900
 
-# Active Work Time (in seconds)
-SHORT_TIMEOUT_S=1200           # 20 minutes of work triggers a short break
-LONG_TIMEOUT_S=3600            # 60 minutes of work triggers a long break
+SHORT_TIMEOUT_S=1200
+LONG_TIMEOUT_S=3600
 
-# Break Durations (in seconds)
-SHORT_BREAK_DURATION=30        # 30 seconds
-LONG_BREAK_DURATION=900        # 15 minutes
+SHORT_BREAK_DURATION=30
+LONG_BREAK_DURATION=900
 
-# ==========================================
-# Initialization & Checks
-# ==========================================
 for cmd in xprintidle xrandr aplay; do
     if ! command -v "$cmd" &>/dev/null; then
         echo "Error: Required command '$cmd' is not installed." >&2
@@ -32,13 +23,9 @@ for cmd in xprintidle xrandr aplay; do
     fi
 done
 
-# Exclusive execution locking
 exec 9>"$LOCK_FILE" || exit 1
 flock -n 9 || { echo "Script is already running."; exit 0; }
 
-# ==========================================
-# State Variables
-# ==========================================
 short_elapsed=0
 long_elapsed=0
 screen_is_off=0
@@ -46,11 +33,8 @@ sleep_pid=""
 abort_break=0
 in_break=0
 
-# ==========================================
-# Helper Functions
-# ==========================================
 set_screen() {
-    local state="$1" # "auto" or "off"
+    local state="$1"
     xrandr --output "$DISPLAY_OUTPUT" --"$state" &>/dev/null || true
 }
 
@@ -61,10 +45,6 @@ play_notification() {
 }
 
 emergency_wake() {
-    # Only flag an abort when a break is actually in progress.
-    # Otherwise a SIGUSR1 during the main-loop poll sleep would leak
-    # abort_break=1 into the next take_break (which would then clear it
-    # and swallow the wake by sleeping the full duration anyway).
     if (( in_break == 1 )); then
         abort_break=1
     fi
@@ -81,14 +61,12 @@ take_break() {
     in_break=1
     abort_break=0
 
-    # Sleep in the background so the trap can safely interrupt it
     sleep "$duration" 9>&- &
     sleep_pid=$!
     wait "$sleep_pid" 2>/dev/null
     sleep_pid=""
     in_break=0
 
-    # Restore screen
     set_screen "auto"
     screen_is_off=0
     short_elapsed=0
@@ -98,34 +76,19 @@ take_break() {
     fi
 }
 
-# ==========================================
-# Traps
-# ==========================================
-# Bind emergency wake to SIGUSR1
 trap 'emergency_wake' SIGUSR1
 
-# Ensure screen turns back on if the script is killed, exits, or crashes
 trap 'set_screen "auto"' EXIT
 
-# ==========================================
-# Main Loop
-# ==========================================
 while true; do
-    # 1. Safe Polling: We sleep at the top of the loop in the background.
-    # This guarantees that receiving a signal won't crash the script.
     poll_start=$SECONDS
     sleep "$POLL_INTERVAL" 9>&- &
     sleep_pid=$!
     wait "$sleep_pid" 2>/dev/null
     sleep_pid=""
-    # Belt-and-braces with the in_break guard above: a SIGUSR1 that
-    # interrupted this poll sleep must not leak abort_break=1 into the
-    # next take_break. Also measure the actual slept time so an early
-    # wake doesn't overcount work time by a full POLL_INTERVAL.
     abort_break=0
     poll_elapsed=$(( SECONDS - poll_start ))
 
-    # 2. Safely read idle time. If X11 is inaccessible, skip this tick.
     idle_ms=$(xprintidle 2>/dev/null)
     if ! [[ "$idle_ms" =~ ^[0-9]+$ ]]; then
         continue
@@ -133,13 +96,11 @@ while true; do
 
     idle_s=$(( idle_ms / 1000 ))
 
-    # 3. Screen is off, but user became active
     if (( screen_is_off == 1 )) && (( idle_s < IDLE_THRESHOLD_S )); then
         set_screen "auto"
         screen_is_off=0
     fi
 
-    # 4. User is currently idle
     if (( idle_s >= IDLE_THRESHOLD_S )); then
         if (( screen_is_off == 0 )); then
             set_screen "off"
@@ -151,14 +112,12 @@ while true; do
         if (( idle_s >= LONG_TIMER_RESET_IDLE_S )); then
             long_elapsed=0
         fi
-        continue # Skip accumulating work time while idle
+        continue
     fi
 
-    # 5. Accumulate active work time (actual time slept, not full interval)
     (( short_elapsed += poll_elapsed ))
     (( long_elapsed  += poll_elapsed ))
 
-    # 6. Enforce breaks
     if (( long_elapsed >= LONG_TIMEOUT_S )); then
         long_elapsed=0
         take_break "$LONG_BREAK_DURATION"
