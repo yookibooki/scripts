@@ -54,7 +54,7 @@ set_screen() {
 
 play_notification() {
     if [[ -f "$NOTIFICATION_SOUND" ]]; then
-        aplay -q "$NOTIFICATION_SOUND" &>/dev/null &
+        aplay -q -D plughw:CARD=PCH "$NOTIFICATION_SOUND" 9>&- &>/dev/null &
     fi
 }
 
@@ -73,7 +73,7 @@ take_break() {
     abort_break=0
 
     # Sleep in the background so the trap can safely interrupt it
-    sleep "$duration" &
+    sleep "$duration" 9>&- &
     sleep_pid=$!
     wait "$sleep_pid" 2>/dev/null
     sleep_pid=""
@@ -103,7 +103,7 @@ trap 'set_screen "auto"' EXIT
 while true; do
     # 1. Safe Polling: We sleep at the top of the loop in the background.
     # This guarantees that receiving a signal won't crash the script.
-    sleep "$POLL_INTERVAL" &
+    sleep "$POLL_INTERVAL" 9>&- &
     sleep_pid=$!
     wait "$sleep_pid" 2>/dev/null
     sleep_pid=""
