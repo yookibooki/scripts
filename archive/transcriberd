@@ -1,0 +1,67 @@
+#!/home/dev/.local/share/transcriberd/.venv/bin/python
+import os, signal, subprocess, tempfile, traceback, httpx
+
+WAV  = os.path.join(tempfile.gettempdir(), "transcriber-a.wav")
+FIFO = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "transcriber.fifo")
+API  = "https://api.groq.com/openai/v1"
+
+client = httpx.Client(
+    http2=True, timeout=30,
+    headers={"Authorization": f"Bearer {os.environ['GROQ_API_KEY']}"},
+)
+try:                                    # prewarm: handshake paid once, at login
+    client.get(f"{API}/models")
+except Exception:
+    pass
+
+rec = None
+
+def start():
+    global rec
+    if rec and rec.poll() is None:
+        return                          # ignore key-repeat
+    rec = subprocess.Popen(["arecord", "-q", "-f", "S16_LE", "-r", "16000",
+                            "-c", "1", "-t", "wav", WAV])
+
+def stop():
+    global rec
+    if not rec or rec.poll() is not None:
+        return
+    rec.send_signal(signal.SIGINT); rec.wait(); rec = None
+
+    with open(WAV, "rb") as f:          # call 1: reuses the warm connection
+        r = client.post(f"{API}/audio/transcriptions",
+                        data={"model": "whisper-large-v3-turbo", "language": "en"},
+                        files={"file": f})
+    os.unlink(WAV)
+    text = (r.json().get("text") or "").strip()
+    if not text:
+        return
+
+    r = client.post(f"{API}/chat/completions",   # call 2: same socket
+                    json={"model": "qwen/qwen3.8-27b",
+                          "messages": [{"role": "user",
+                                        "content": f"Condense the following text: {text}"}]})
+    out = (r.json()["choices"][0]["message"]["content"] or "").strip()
+    if not out:
+        return
+
+    subprocess.run(["xclip", "-selection", "clipboard", "-i"], input=out.encode())
+    subprocess.run(["xdotool", "key", "--clearmodifiers", "ctrl+v"])
+
+os.makedirs(os.path.dirname(FIFO), exist_ok=True)
+try:
+    os.mkfifo(FIFO)
+except FileExistsError:
+    pass
+
+# O_RDWR: never blocks on open, never sees EOF, so the reader loop just idles
+with os.fdopen(os.open(FIFO, os.O_RDWR), "r", buffering=1) as f:
+    for line in f:
+        c = line.strip()
+        try:
+            if c == "start":  start()
+            elif c == "stop": stop()
+            elif c == "quit": break
+        except Exception:               # one bad cycle must not kill the daemon
+            traceback.print_exc()
