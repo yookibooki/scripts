@@ -38,7 +38,7 @@ const (
 	// Only condense transcripts longer than this. Below it, the LLM round-trip
 	// costs more latency than it saves, and short dictations are usually
 	// already in final form.
-	condenseMinChars = 200
+	condenseMinChars = 100
 
 	// Pre-roll kept while idle so the first syllable isn't lost between
 	// key-press and arecord spin-up.
