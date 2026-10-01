@@ -26,15 +26,6 @@ stop)
   t=$(printf '%s' "$t" | sed 's/^[[:space:]]*//')
   [ -n "$t" ] || exit
 
-  t=$(jq -n --arg p "Condense the following text: $t" \
-        '{model:"qwen/qwen3.8-27b",messages:[{role:"user",content:$p}]}' \
-      | curl -sS --http2 "$api/chat/completions" \
-          -H "Authorization: Bearer $GROQ_API_KEY" \
-          -H "Content-Type: application/json" \
-          -d @- \
-      | jq -r '.choices[0].message.content // empty')
-  [ -n "$t" ] || exit
-
   printf %s "$t" | xclip -selection clipboard -i
   xdotool key --clearmodifiers ctrl+v
   ;;

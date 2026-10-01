@@ -1,2 +1,0 @@
-#!/bin/sh
-printf '%s\n' "${1:?start|stop}" > "${XDG_RUNTIME_DIR:-/tmp}/transcriber.fifo"
