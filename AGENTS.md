@@ -1,5 +1,4 @@
 # transcriber.sh — push-to-dictate
-Hold Right Ctrl = dictate raw. Hold Right Shift = dictate then condense.
 related: ~/.config/i3/config, ~/.local/bin/transcriber.sh (symlink).
 
 # idlewatch.sh — idle monitor + break enforcer
